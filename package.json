@@ -1,0 +1,22 @@
+{
+  "name": "claude-skill-tools",
+  "version": "0.1.0",
+  "description": "Composer and sandbox developer tools for Claude Code workflows",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "composer": "./dist/bin/composer.js",
+    "sandbox": "./dist/bin/sandbox.js"
+  },
+  "files": [
+    "dist/",
+    "prompts/",
+    "hooks/"
+  ],
+  "scripts": {
+    "build": "tsc && node scripts/copy-assets.mjs",
+    "prepublishOnly": "npm run build"
+  }
+}
