@@ -12,6 +12,7 @@ Composer and sandbox developer tools for Claude Code workflows. Orchestrate mult
 - **PR creation** — Auto-generate Azure DevOps pull requests from sandbox artifacts
 - **ADO integration** — Fetch work items as markdown context for compositions
 - **Session metrics** — Track Claude CLI session IDs per composition step and generate cost/token/tool usage reports
+- **Session explorer** — Deep-dive analysis of individual sessions with timeline visualization and subagent tracking
 
 ## Requirements
 
@@ -85,6 +86,7 @@ my-repo/
 ```
 
 Resolution order:
+
 1. **Repo-local** (`.claude/prompts/<role>.md`) — checked first
 2. **Package default** (`prompts/<role>.md` in the installed package) — fallback
 
@@ -298,17 +300,20 @@ src/
   composer/        Composer orchestration engine
   sandbox/         Sandbox worktree management and ralph loop
   connectors/      External service integrations (ADO PR creation, work item fetching)
-  metrics/         Session metrics tracking and analysis
-  bin/             CLI entry point shims
+  metrics/         Session metrics tracking and batch analysis (session-metrics.ts)
+  session-explorer/ Deep single-session analysis with timeline (session-explorer)
+  bin/             CLI entry point shims (composer, sandbox, session-explorer)
 ```
 
 ## State Storage
 
 Session and sandbox state is stored repo-locally at:
+
 - Composer: `<repo>/.claude/.skill-state/composer/`
 - Sandbox: `<repo>/.claude/.skill-state/sandbox/`
 
 Durable metrics data is stored at the user level:
+
 - Session maps: `~/claude-skill-tools/session-maps/`
 - Parsed session cache: `~/claude-skill-tools/parsed-sessions.json`
 - User-level config: `~/claude-skill-tools/config.json`
@@ -328,11 +333,44 @@ Configuration is resolved by merging repo-level overrides with user-level defaul
 Repo-level fields take precedence. For nested objects like `adoFields`, sub-keys are merged (repo sub-keys override user sub-keys). You only need to specify the fields you want to override at the repo level.
 
 Example repo-level config that overrides only the ADO org for this repo:
+
 ```json
 {
   "adoOrg": "https://dev.azure.com/my-team-org"
 }
 ```
+
+## Session Explorer
+
+The `session-explorer` CLI provides deep single-session analysis with an interactive timeline.
+
+### Usage
+
+```bash
+# Launch interactive session browser (local web app)
+session-explorer
+
+# Generate HTML report for a specific session
+session-explorer <sessionId>
+
+# Output raw analysis as JSON
+session-explorer <sessionId> --json
+
+# Custom port for the browser
+session-explorer --port 8080
+
+# Save report to a specific file
+session-explorer <sessionId> --out report.html
+```
+
+### Features
+
+- **Metrics tab** — Token usage, cost breakdown by model, tool call distribution, task classification
+- **Timeline tab** — Every event in order: user messages, assistant text, tool uses, tool results, thinking blocks — each with human-readable summaries
+- **Subagent tracking** — Loads subagent JSONL files, merges them into the timeline, and computes per-subagent metrics
+- **Browser mode** — Local HTTP server with a session sidebar for on-demand parsing
+
+This complements `composer report` (batch metrics across sessions) by drilling into a single session in detail.
 
 ## Cross-Platform Notes
 

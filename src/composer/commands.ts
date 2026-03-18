@@ -8,7 +8,12 @@ import {
   getRepoRoot,
   getSandboxStateDirPath,
 } from "./config/compositions.js";
-import { getComposerStateDir, getAllPromptFiles, resolvePromptFile, PACKAGE_ROOT } from "../shared/paths.js";
+import {
+  getComposerStateDir,
+  getAllPromptFiles,
+  resolvePromptFile,
+  PACKAGE_ROOT,
+} from "../shared/paths.js";
 import {
   die,
   nowISO,
@@ -49,7 +54,7 @@ function getGitUser(): string {
 }
 
 function getAvailableRoles(): string[] {
-  return getAllPromptFiles().map(f => path.basename(f, ".md"));
+  return getAllPromptFiles().map((f) => path.basename(f, ".md"));
 }
 
 export function getAvailableCompositions(): string[] {
@@ -97,24 +102,26 @@ export function cmdList(): void {
     const padded = name.padEnd(15);
     return `  ${ui.cyan(padded)} ${comp.description} ${ui.dim(`(${comp.steps.length} steps)`)}`;
   });
-  console.log([
-    ui.bold("Available compositions:"),
-    "",
-    ...compLines,
-    "",
-    ui.bold("Usage:"),
-    '  composer compose <type> --context "..." | --context-file <path> | --ado <id>',
-    "",
-    ui.bold("Options:"),
-    "  --model <model>         Model to use (default: opus)",
-    "  --max-iterations <n>    Max dev/review iterations (default: 5)",
-    "  --role <name>           Role to run (required for 'role' composition)",
-    "  --name <session-name>   Custom session name (auto-deduped if taken)",
-    "  --base <branch>         Base branch for sandbox worktree (default: master)",
-    "  --skip-sandbox          Skip sandbox creation, run on current branch",
-    "",
-    "Run 'composer --help' for full usage details.",
-  ].join("\n"));
+  console.log(
+    [
+      ui.bold("Available compositions:"),
+      "",
+      ...compLines,
+      "",
+      ui.bold("Usage:"),
+      '  composer compose <type> --context "..." | --context-file <path> | --ado <id>',
+      "",
+      ui.bold("Options:"),
+      "  --model <model>         Model to use (default: opus)",
+      "  --max-iterations <n>    Max dev/review iterations (default: 5)",
+      "  --role <name>           Role to run (required for 'role' composition)",
+      "  --name <session-name>   Custom session name (auto-deduped if taken)",
+      "  --base <branch>         Base branch for sandbox worktree (default: master)",
+      "  --skip-sandbox          Skip sandbox creation, run on current branch",
+      "",
+      "Run 'composer --help' for full usage details.",
+    ].join("\n"),
+  );
 }
 
 export async function cmdCompose(args: string[]): Promise<void> {
@@ -239,7 +246,9 @@ export async function cmdCompose(args: string[]): Promise<void> {
       context = manual.trim();
     }
 
-    console.log(`\n=== ADO Work Item Context ===\n\n${context}\n\n=============================`);
+    console.log(
+      `\n=== ADO Work Item Context ===\n\n${context}\n\n=============================`,
+    );
     const answer = await promptUser("Proceed with this context? (y/n) ");
     if (answer.toLowerCase() !== "y") {
       console.log("Aborted.");
@@ -294,11 +303,11 @@ export async function cmdCompose(args: string[]): Promise<void> {
   // --skip-sandbox: skip sandbox creation step, run on current branch
   if (skipSandbox) {
     const repoRoot = getRepoRoot();
-    const currentBranch = spawnSync(
-      "git",
-      ["-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD"],
-      { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] },
-    ).stdout?.trim() || "";
+    const currentBranch =
+      spawnSync("git", ["-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD"], {
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).stdout?.trim() || "";
 
     if (!currentBranch) {
       die("Could not determine current git branch for --skip-sandbox.");
@@ -392,8 +401,8 @@ export function cmdSessions(): void {
     return id.slice(0, max - 5) + "…" + id.slice(-4);
   };
 
-  const displayIds = sessions.map(s => truncateId(s.sessionId));
-  const idWidth = Math.max(4, ...displayIds.map(id => id.length)) + 2;
+  const displayIds = sessions.map((s) => truncateId(s.sessionId));
+  const idWidth = Math.max(4, ...displayIds.map((id) => id.length)) + 2;
   const updatedWidth = 10;
 
   const header = [
@@ -464,19 +473,19 @@ export async function cmdClean(args: string[]): Promise<void> {
       needsConfirmation = true;
       break;
     case "--completed":
-      toRemove = sessions.filter(s => s.status === "completed");
+      toRemove = sessions.filter((s) => s.status === "completed");
       needsConfirmation = true;
       break;
     case "--stale":
       toRemove = sessions.filter(
-        s => s.status === "completed" || s.status === "paused",
+        (s) => s.status === "completed" || s.status === "paused",
       );
       needsConfirmation = true;
       break;
     default: {
       // Treat as session ID (supports short IDs) — no confirmation needed
       const resolved = resolveSessionId(flag);
-      toRemove = sessions.filter(s => s.sessionId === resolved);
+      toRemove = sessions.filter((s) => s.sessionId === resolved);
     }
   }
 
@@ -509,7 +518,9 @@ export async function cmdClean(args: string[]): Promise<void> {
         { cwd: repoRoot, stdio: "inherit" },
       );
       if (result.status !== 0) {
-        ui.warn(`Sandbox cleanup failed for ${s.branch} (may already be gone).`);
+        ui.warn(
+          `Sandbox cleanup failed for ${s.branch} (may already be gone).`,
+        );
       }
     }
     deleteSession(s.sessionId);
@@ -594,7 +605,7 @@ export async function cmdReport(args: string[]): Promise<void> {
   // Resolve partial session ID
   const allMaps = listAllSessionMaps();
   const match = allMaps.find(
-    m =>
+    (m) =>
       m.composerSessionId === sessionId ||
       m.composerSessionId.endsWith(sessionId) ||
       m.composerSessionId.startsWith(sessionId),
@@ -617,10 +628,13 @@ export async function cmdReport(args: string[]): Promise<void> {
 
   // Lazy import to avoid loading the large analyzer module unless needed
   const { parseSession, printSessionMetrics, generateHtmlReport } =
-    await import("../metrics/analyze-sessions.js");
+    await import("../metrics/session-metrics.js");
 
   // Collect and parse all session files
-  type ParsedEntry = { label: string; metrics: ReturnType<typeof parseSession> };
+  type ParsedEntry = {
+    label: string;
+    metrics: ReturnType<typeof parseSession>;
+  };
   const parsed: ParsedEntry[] = [];
 
   for (const entry of map.claudeSessions) {
@@ -655,16 +669,12 @@ export async function cmdReport(args: string[]): Promise<void> {
     ]);
   }
 
-  const allMetrics = parsed.map(p => p.metrics);
+  const allMetrics = parsed.map((p) => p.metrics);
 
   // Output
   if (format === "json") {
     console.log(
-      JSON.stringify(
-        { composerSession: map, metrics: allMetrics },
-        null,
-        2,
-      ),
+      JSON.stringify({ composerSession: map, metrics: allMetrics }, null, 2),
     );
   } else if (format === "text") {
     ui.banner(`Report: ${map.compositionType}`, [
@@ -728,7 +738,7 @@ export async function cmdDistill(args: string[]): Promise<void> {
   // If no session specified, pick the most recent one with a worktree
   if (!sessionId) {
     const sessions = listStateSessions()
-      .filter(s => s.worktree)
+      .filter((s) => s.worktree)
       .sort((a, b) => {
         const ta = new Date(a.updated || a.started || "").getTime() || 0;
         const tb = new Date(b.updated || b.started || "").getTime() || 0;
@@ -764,7 +774,7 @@ export async function cmdDistill(args: string[]): Promise<void> {
   if (fromImpl) {
     console.log(
       `\n  ${ui.yellow("⚗")}  ${ui.yellow("Distilling feature request from implementation...")}` +
-      `\n  ${ui.dim("   Reading code diff + planning artifacts in " + state.worktree)}`,
+        `\n  ${ui.dim("   Reading code diff + planning artifacts in " + state.worktree)}`,
     );
 
     const content = await generateImplementationFeatureRequest(
@@ -798,7 +808,7 @@ export async function cmdDistill(args: string[]): Promise<void> {
   } else {
     console.log(
       `\n  ${ui.yellow("⚗")}  ${ui.yellow("Distilling improved feature request...")}` +
-      `\n  ${ui.dim("   Sending feature-request.md + requirements.md + spec.md to Claude")}`,
+        `\n  ${ui.dim("   Sending feature-request.md + requirements.md + spec.md to Claude")}`,
     );
 
     const content = await generateImprovedFeatureRequest(state.worktree, model);

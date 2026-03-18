@@ -74,7 +74,7 @@ The sandbox guard hook (`hooks/sandbox-guard.sh`) is a PreToolUse hook that rest
 ### Metrics
 
 - `src/metrics/session-map.ts` - Maps composer sessions to Claude CLI session IDs (stored in `~/claude-skill-tools/session-maps/`)
-- `src/metrics/analyze-sessions.ts` - Parses Claude `.jsonl` session logs for token usage, cost, tool call breakdowns; generates HTML/text/JSON reports
+- `src/metrics/session-metrics.ts` - Parses Claude `.jsonl` session logs for token usage, cost, tool call breakdowns; generates HTML/text/JSON reports
 - `src/metrics/uuid.ts` - Deterministic session ID generation
 
 ### Shared Layer
