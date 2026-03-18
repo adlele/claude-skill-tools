@@ -1,2 +1,5 @@
 dist/
 node_modules/
+.claude/.skill-state/
+tasks.md
+.claude/settings.local.json

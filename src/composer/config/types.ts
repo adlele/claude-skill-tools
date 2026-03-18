@@ -1,17 +1,17 @@
 export type StepType =
+  | "sandbox-create"
   | "sandbox-start"
-  | "sandbox-start-ralph"
-  | "sandbox-start-headless"
   | "claude-interactive"
   | "ralph"
   | "status-check"
   | "pr-dry-run"
-  | "pr-create";
+  | "ado-pr-create";
 
 export interface Step {
   label: string;
   cmd: string;
   type: StepType;
+  autoAdvance?: boolean;
 }
 
 export interface Composition {
@@ -33,6 +33,9 @@ export interface SessionState {
   adoId: string;
   /** Role name for the 'role' composition (e.g. "architect", "developer") */
   role?: string;
+  /** Base branch for sandbox worktree (default: master) */
+  baseBranch: string;
+  skipSandbox?: boolean;
   stepTimings: number[];
   started: string;
   updated: string;
@@ -41,7 +44,7 @@ export interface SessionState {
 export interface TemplateVars {
   sessionId: string;
   context: string;
-  /** Pre-computed branch name passed to sandbox start (e.g. users/adlele/add-pin-message-a1b2) */
+  /** Pre-computed branch name passed to sandbox start (e.g. users/jdoe/add-pin-message-a1b2) */
   branchName: string;
   /** Actual branch captured from sandbox state after step 1 */
   branch: string;
@@ -51,4 +54,8 @@ export interface TemplateVars {
   adoId: string;
   /** Role name for the 'role' composition (e.g. "architect", "developer") */
   role: string;
+  /** Base branch for sandbox worktree (default: master) */
+  baseBranch: string;
+  /** Claude session ID for metrics tracking (set per-step) */
+  claudeSessionId?: string;
 }

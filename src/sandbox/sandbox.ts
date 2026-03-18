@@ -5,8 +5,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { spawnSync, spawn } from "node:child_process";
 
-import { die, nowISO, promptUser, sleep } from "../shared/utils.js";
-import { resolveRepoRoot, PROMPTS_DIR } from "../shared/paths.js";
+import { nowISO, promptUser, sleep } from "../shared/utils.js";
+import { die } from "../shared/ui.js";
+import * as ui from "../shared/ui.js";
+import { resolveRepoRoot, PROMPTS_DIR, resolvePromptFile, migrateConfigDir } from "../shared/paths.js";
 import type { SandboxState, CreateResult } from "./config/types.js";
 import {
   getRepoRoot,
@@ -23,6 +25,7 @@ import {
   getStateFiles,
   tailFile,
   resolveBranchFromId,
+  findOrphanedWorktrees,
 } from "./config/paths.js";
 import { generateAuditSummary } from "./audit.js";
 import {
@@ -30,8 +33,10 @@ import {
   parseComments,
   filterIgnored,
   runAgentWithTimer,
+  runInteractiveAgentWithLog,
   generateReadableLog,
 } from "./ralph-helpers.js";
+import { addClaudeSession } from "../metrics/session-map.js";
 import {
   generateFeatureRequestChangesSummary,
   generateImprovedFeatureRequest,
@@ -68,6 +73,17 @@ function cmdRoles(): void {
   );
 }
 
+// --- helpers ---
+
+function sandboxStatus(state: SandboxState): string {
+  if (!fs.existsSync(state.worktree)) return "MISSING";
+  if (state.mode === "headless" && state.pid && state.pid !== "") {
+    const pid = parseInt(state.pid, 10);
+    return isProcessRunning(pid) ? "RUNNING" : "STOPPED";
+  }
+  return "ACTIVE";
+}
+
 // --- list ---
 
 function cmdList(): void {
@@ -78,33 +94,72 @@ function cmdList(): void {
     return;
   }
 
-  const pad = (s: string, n: number) => s.padEnd(n);
-  console.log(
-    `${pad("ID", 20)} ${pad("BRANCH", 35)} ${pad("MODE", 12)} ${pad("STATUS", 8)} WORKTREE`,
-  );
-  console.log(
-    `${pad("--", 20)} ${pad("------", 35)} ${pad("----", 12)} ${pad("------", 8)} --------`,
-  );
-
-  let found = false;
+  // Parse state files, skip corrupted
+  const entries: { state: SandboxState; status: string }[] = [];
   for (const f of jsonFiles) {
-    found = true;
-    const state: SandboxState = JSON.parse(fs.readFileSync(f, "utf-8"));
-
-    let status = "ACTIVE";
-    if (!fs.existsSync(state.worktree)) {
-      status = "MISSING";
-    } else if (state.mode === "headless" && state.pid && state.pid !== "") {
-      const pid = parseInt(state.pid, 10);
-      status = isProcessRunning(pid) ? "RUNNING" : "STOPPED";
+    let state: SandboxState;
+    try { state = JSON.parse(fs.readFileSync(f, "utf-8")); } catch {
+      ui.warn(`Skipping corrupted state file: ${f}`);
+      continue;
     }
-
-    console.log(
-      `${pad(state.slug, 20)} ${pad(state.branch, 35)} ${pad(state.mode, 12)} ${pad(status, 8)} ${state.worktree}`,
-    );
+    entries.push({ state, status: sandboxStatus(state) });
   }
 
-  if (!found) console.log("No sandboxes found.");
+  if (entries.length === 0) return;
+
+  // Sort by created timestamp, most recent first
+  entries.sort((a, b) => {
+    const ta = new Date(a.state.created || "").getTime() || 0;
+    const tb = new Date(b.state.created || "").getTime() || 0;
+    return tb - ta;
+  });
+
+  const idWidth = Math.max(6, ...entries.map(e => e.state.slug.length)) + 2;
+  const createdWidth = 10;
+  const header = [
+    "ID".padEnd(idWidth),
+    "MODE".padEnd(12),
+    "STATUS".padEnd(10),
+    "CREATED".padEnd(createdWidth),
+    "BRANCH",
+  ].join(" ");
+  const divider = [
+    "─".repeat(idWidth),
+    "─".repeat(12),
+    "─".repeat(10),
+    "─".repeat(createdWidth),
+    "──────",
+  ].join(" ");
+
+  console.log(header);
+  console.log(divider);
+
+  for (const { state, status } of entries) {
+    const badge = ui.statusBadge(status);
+    const ansiOverhead = badge.length - status.length;
+    const created = state.created ? ui.relativeTime(state.created) : ui.dim("—");
+    const createdOverhead = state.created ? 0 : created.length - "—".length;
+    console.log([
+      state.slug.padEnd(idWidth),
+      state.mode.padEnd(12),
+      badge.padEnd(10 + ansiOverhead),
+      created.padEnd(createdWidth + createdOverhead),
+      state.branch,
+    ].join(" "));
+  }
+
+  // Warn about missing worktrees
+  const missing = entries.filter(e => e.status === "MISSING");
+  if (missing.length > 0) {
+    console.log("");
+    ui.warn(`${missing.length} sandbox(es) have missing worktrees. Run: sandbox clean --missing`);
+  }
+
+  // Warn about orphaned worktree dirs
+  const orphans = findOrphanedWorktrees();
+  if (orphans.length > 0) {
+    ui.warn(`${orphans.length} orphaned worktree dir(s) found. Run: sandbox clean --orphans`);
+  }
 }
 
 // --- status ---
@@ -124,7 +179,14 @@ function cmdStatus(args: string[]): void {
         i++;
         break;
       default:
-        die(`Unknown option for status: ${args[i]}`);
+        // Treat bare arg (no --) as a short ID
+        if (!args[i].startsWith("--")) {
+          id = args[i];
+          i++;
+        } else {
+          die(`Unknown option for status: ${args[i]}`, ["Run 'sandbox --help' for usage."]);
+        }
+        continue;
     }
   }
 
@@ -195,6 +257,8 @@ async function cmdCreate(args: string[]): Promise<CreateResult> {
   let branch = "";
   let base = "master";
   let setup = false;
+  let context = "";
+  let contextFile = "";
 
   let i = 0;
   while (i < args.length) {
@@ -211,8 +275,16 @@ async function cmdCreate(args: string[]): Promise<CreateResult> {
         setup = true;
         i++;
         break;
+      case "--context":
+        context = args[++i] ?? "";
+        i++;
+        break;
+      case "--context-file":
+        contextFile = args[++i] ?? "";
+        i++;
+        break;
       default:
-        die(`Unknown option for create: ${args[i]}`);
+        die(`Unknown option for create: ${args[i]}`, ["Run 'sandbox --help' for usage."]);
     }
   }
 
@@ -271,10 +343,17 @@ async function cmdCreate(args: string[]): Promise<CreateResult> {
     die(`Failed to create worktree: ${wtResult.stderr?.trim()}`);
   }
 
-  // Optional setup
+  // Dependency setup: --setup runs full install, otherwise symlink from main repo
   if (setup) {
     console.log("Running yarn predev in worktree...");
     spawnSync("yarn", ["predev"], { cwd: worktreePath, stdio: "inherit" });
+  } else {
+    const mainNodeModules = path.join(REPO_ROOT, "node_modules");
+    const worktreeNodeModules = path.join(worktreePath, "node_modules");
+    if (fs.existsSync(mainNodeModules) && !fs.existsSync(worktreeNodeModules)) {
+      console.log("Symlinking node_modules from main repo...");
+      fs.symlinkSync(mainNodeModules, worktreeNodeModules);
+    }
   }
 
   // Copy all role prompts into the sandbox
@@ -323,6 +402,7 @@ async function cmdCreate(args: string[]): Promise<CreateResult> {
     "feature-request.md",
     "audit-raw.jsonl",
     "audit-log.md",
+    ".ralph-auto-advance",
   ];
   const gitignorePath = path.join(worktreePath, ".gitignore");
   let existingIgnore = "";
@@ -354,6 +434,20 @@ async function cmdCreate(args: string[]): Promise<CreateResult> {
       2,
     ) + "\n",
   );
+
+  // Seed feature-request.md if context was provided
+  if (context) {
+    fs.writeFileSync(
+      path.join(worktreePath, "feature-request.md"),
+      context + "\n",
+    );
+    console.log("Seeded feature-request.md from --context");
+  } else if (contextFile) {
+    if (!fs.existsSync(contextFile))
+      die(`Context file not found: ${contextFile}`);
+    fs.copyFileSync(contextFile, path.join(worktreePath, "feature-request.md"));
+    console.log(`Seeded feature-request.md from ${contextFile}`);
+  }
 
   // Save state
   writeState({
@@ -401,12 +495,54 @@ async function cmdCreate(args: string[]): Promise<CreateResult> {
 
 // --- cleanup ---
 
-async function cmdCleanup(args: string[]): Promise<void> {
+async function cmdClean(args: string[]): Promise<void> {
+  // Interactive mode: no args + TTY → show list and prompt
+  if (args.length === 0) {
+    const jsonFiles = getStateFiles();
+    if (jsonFiles.length === 0) {
+      console.log("No sandboxes to clean.");
+      return;
+    }
+    if (!process.stdin.isTTY) {
+      die("Missing target for clean.", [
+        "Run 'sandbox clean --help' for usage.",
+        "Run 'sandbox list' to see available sandboxes.",
+      ]);
+    }
+    const items: { state: SandboxState; status: string }[] = [];
+    for (const f of jsonFiles) {
+      let state: SandboxState;
+      try { state = JSON.parse(fs.readFileSync(f, "utf-8")); } catch { continue; }
+      items.push({ state, status: sandboxStatus(state) });
+    }
+    if (items.length === 0) {
+      console.log("No sandboxes to clean.");
+      return;
+    }
+    console.log("");
+    for (let idx = 0; idx < items.length; idx++) {
+      const { state, status } = items[idx];
+      console.log(`  ${ui.dim(`${idx + 1}.`)} ${state.slug}  ${ui.statusBadge(status)}  ${ui.dim(state.branch)}`);
+    }
+    console.log("");
+    const answer = await promptUser("  Enter number, short ID, or flag (--all/--stopped/--missing): ");
+    const input = answer.trim();
+    if (!input) return;
+    // If numeric, resolve to slug
+    const num = parseInt(input, 10);
+    if (!isNaN(num) && num >= 1 && num <= items.length) {
+      return cmdClean(["--branch", items[num - 1].state.branch]);
+    }
+    // Otherwise pass through as args
+    return cmdClean(input.split(/\s+/));
+  }
+
   let branch = "";
   let id = "";
   let keepBranch = false;
   let force = false;
   let all = false;
+  let statusFilter = "";
 
   let i = 0;
   while (i < args.length) {
@@ -431,49 +567,116 @@ async function cmdCleanup(args: string[]): Promise<void> {
         all = true;
         i++;
         break;
+      case "--stopped":
+      case "--missing":
+      case "--active":
+      case "--running":
+        statusFilter = args[i].slice(2); // strip "--"
+        i++;
+        break;
+      case "--orphans":
+        statusFilter = "orphans";
+        i++;
+        break;
       default:
-        die(`Unknown option for cleanup: ${args[i]}`);
+        // Treat bare arg (no --) as a short ID
+        if (!args[i].startsWith("--")) {
+          id = args[i];
+          i++;
+        } else {
+          die(`Unknown option for clean: ${args[i]}`, ["Run 'sandbox --help' for usage."]);
+        }
     }
   }
 
   const REPO_ROOT = getRepoRoot();
   const SANDBOX_BASE = getSandboxBase();
 
-  // Resolve --id to a branch name
+  // Resolve --id (or positional short ID) to a branch name
   if (id && !branch) {
     branch = resolveBranchFromId(id);
   }
 
-  // --all: iterate over all known sandboxes and clean each one
-  if (all) {
+  // Handle --orphans: clean worktree dirs with no state file
+  if (statusFilter === "orphans") {
+    const orphans = findOrphanedWorktrees();
+    if (orphans.length === 0) {
+      console.log("No orphaned worktrees found.");
+      return;
+    }
+    console.log(`Found ${orphans.length} orphaned worktree dir(s):`);
+    for (const o of orphans) { console.log(`  ${o}`); }
+    if (!force) {
+      console.log("");
+      const answer = await promptUser(`  Remove all ${orphans.length} orphaned dir(s)? [y/N] `);
+      if (!/^[yY]$/.test(answer.trim())) {
+        console.log("  Aborted.");
+        return;
+      }
+    }
+    for (const o of orphans) {
+      spawnSync("git", ["-C", REPO_ROOT, "worktree", "remove", o, "--force"], { stdio: "ignore" });
+      if (fs.existsSync(o)) {
+        spawnSync("rm", ["-rf", o], { stdio: "ignore" });
+      }
+      console.log(`  Removed: ${o}`);
+    }
+    return;
+  }
+
+  // Bulk clean: --all or --stopped/--missing/--active/--running
+  if (all || statusFilter) {
     const jsonFiles = getStateFiles();
     if (jsonFiles.length === 0) {
       console.log("No sandboxes to clean up.");
       return;
     }
-    const total = jsonFiles.length;
-    console.log(`=== Cleaning up ${total} sandbox(es) ===`);
+
+    // Filter by status if requested (skip corrupted state files)
+    const targets: SandboxState[] = [];
+    for (const f of jsonFiles) {
+      let state: SandboxState;
+      try { state = JSON.parse(fs.readFileSync(f, "utf-8")); } catch {
+        ui.warn(`Skipping corrupted state file: ${f}`);
+        continue;
+      }
+      if (!statusFilter || sandboxStatus(state).toLowerCase() === statusFilter) {
+        targets.push(state);
+      }
+    }
+
+    if (targets.length === 0) {
+      console.log(`No sandboxes matching status '${statusFilter}'.`);
+      return;
+    }
+
+    const label = statusFilter ? `${statusFilter} ` : "";
+    console.log(`=== Cleaning up ${targets.length} ${label}sandbox(es) ===`);
     console.log("");
-    for (let idx = 0; idx < jsonFiles.length; idx++) {
-      const state: SandboxState = JSON.parse(
-        fs.readFileSync(jsonFiles[idx], "utf-8"),
-      );
-      console.log(`[${idx + 1}/${total}] ${state.branch}`);
-      const cleanupArgs = ["--branch", state.branch];
-      if (keepBranch) cleanupArgs.push("--keep-branch");
-      if (force) cleanupArgs.push("--force");
+    for (let idx = 0; idx < targets.length; idx++) {
+      const state = targets[idx];
+      console.log(`[${idx + 1}/${targets.length}] ${state.branch}`);
+      const cleanArgs = ["--branch", state.branch];
+      if (keepBranch) cleanArgs.push("--keep-branch");
+      if (force) cleanArgs.push("--force");
       try {
-        await cmdCleanup(cleanupArgs);
+        await cmdClean(cleanArgs);
       } catch {
         // Continue on error
       }
       console.log("");
     }
-    console.log(`=== All ${total} sandbox(es) cleaned up ===`);
+    console.log(`=== All ${targets.length} ${label}sandbox(es) cleaned up ===`);
     return;
   }
 
-  if (!branch) die("Must provide --branch, --id, or --all");
+  if (!branch) die("Must provide a target for clean.", [
+    "<short-id>    Clean by short ID (from 'sandbox list')",
+    "--all         Clean all sandboxes",
+    "--stopped     Clean stopped sandboxes",
+    "--missing     Clean sandboxes with missing worktrees",
+    "--orphans     Clean orphaned worktree directories",
+  ]);
 
   const sfPath = stateFilePath(branch);
 
@@ -485,6 +688,14 @@ async function cmdCleanup(args: string[]): Promise<void> {
     if (state.pid && state.pid !== "") {
       const pid = parseInt(state.pid, 10);
       if (isProcessRunning(pid)) {
+        if (!force) {
+          ui.warn(`Sandbox has a running process (PID ${pid}).`);
+          const answer = await promptUser("  Kill it and continue? [y/N] ");
+          if (!/^[yY]$/.test(answer.trim())) {
+            console.log("  Aborted.");
+            return;
+          }
+        }
         console.log(`Stopping process ${pid}...`);
         try {
           process.kill(pid);
@@ -549,10 +760,17 @@ async function cmdCleanup(args: string[]): Promise<void> {
       git("show-ref", "--verify", "--quiet", `refs/heads/${branch}`).status ===
       0
     ) {
-      console.log(`Deleting branch ${branch}...`);
-      spawnSync("git", ["-C", REPO_ROOT, "branch", "-D", branch], {
-        stdio: "ignore",
-      });
+      // Check if branch is still checked out in another worktree
+      const wtList = git("worktree", "list", "--porcelain");
+      if (wtList.stdout.includes(`branch refs/heads/${branch}`)) {
+        ui.warn(`Branch '${branch}' is still checked out in another worktree. Skipping deletion.`);
+        console.log("  Use --keep-branch or remove the other worktree first.");
+      } else {
+        console.log(`Deleting branch ${branch}...`);
+        spawnSync("git", ["-C", REPO_ROOT, "branch", "-D", branch], {
+          stdio: "ignore",
+        });
+      }
     }
   }
 
@@ -585,6 +803,7 @@ async function cmdStart(args: string[]): Promise<void> {
   let contextFile = "";
   let ralph = false;
   let maxIterations = "10";
+  let skipSandbox = false;
 
   let i = 0;
   while (i < args.length) {
@@ -633,34 +852,45 @@ async function cmdStart(args: string[]): Promise<void> {
         maxIterations = args[++i] ?? "10";
         i++;
         break;
+      case "--skip-sandbox":
+        skipSandbox = true;
+        i++;
+        break;
       default:
-        die(`Unknown option for start: ${args[i]}`);
+        die(`Unknown option for start: ${args[i]}`, ["Run 'sandbox --help' for usage."]);
     }
   }
 
-  if (ralph) {
-    if (!context && !contextFile && !idea) {
-      die("Ralph mode requires --context, --context-file, or --idea");
-    }
-  } else {
-    if (!role && !idea) die("Must provide --role or --idea");
-    if (role && idea) die("Provide --role or --idea, not both");
-    if (!context && !contextFile && !idea) {
-      die(
-        'Must provide --context or --context-file so the role has a starting point. Example:\n  sandbox start --role analyst --context "Refactor the settings service"',
-      );
+  // --skip-sandbox reuses an existing sandbox — context/role already seeded
+  if (!skipSandbox) {
+    if (ralph) {
+      if (!context && !contextFile && !idea) {
+        die("Ralph mode requires --context, --context-file, or --idea");
+      }
+    } else {
+      if (!role && !idea) die("Must provide --role or --idea");
+      if (role && idea) die("Provide --role or --idea, not both");
+      if (!context && !contextFile && !idea) {
+        die(
+          'Must provide --context or --context-file so the role has a starting point. Example:\n  sandbox start --role analyst --context "Refactor the settings service"',
+        );
+      }
     }
   }
 
   // Validate role if provided
   if (role) {
-    const promptFile = path.join(PROMPTS_DIR, `${role}.md`);
-    if (!fs.existsSync(promptFile)) {
+    if (!resolvePromptFile(`${role}.md`)) {
       const available = getPromptFiles()
         .map(f => path.basename(f, ".md"))
         .join(", ");
       die(`Unknown role '${role}'. Available: ${available}`);
     }
+  }
+
+  // --skip-sandbox requires an explicit branch
+  if (skipSandbox && !branch) {
+    die("--skip-sandbox requires --branch");
   }
 
   // Generate branch name if not provided
@@ -672,24 +902,40 @@ async function cmdStart(args: string[]): Promise<void> {
 
   const SANDBOX_BASE = getSandboxBase();
 
-  // Create worktree
-  const createArgs = ["--branch", branch, "--base", base];
-  if (setup) createArgs.push("--setup");
-  const created = await cmdCreate(createArgs);
-  const worktreePath = created.worktree;
+  let worktreePath: string;
 
-  // Seed feature-request.md if context was provided
-  if (context) {
-    fs.writeFileSync(
-      path.join(worktreePath, "feature-request.md"),
-      context + "\n",
-    );
-    console.log("Seeded feature-request.md from --context");
-  } else if (contextFile) {
-    if (!fs.existsSync(contextFile))
-      die(`Context file not found: ${contextFile}`);
-    fs.copyFileSync(contextFile, path.join(worktreePath, "feature-request.md"));
-    console.log(`Seeded feature-request.md from ${contextFile}`);
+  if (skipSandbox) {
+    // Skip sandbox creation — use existing worktree from sandbox state
+    const state = readState(branch);
+    worktreePath = state.worktree;
+    if (!fs.existsSync(worktreePath)) {
+      die(`Worktree not found for branch '${branch}': ${worktreePath}`);
+    }
+    console.log(`Using existing worktree: ${worktreePath}`);
+  } else {
+    // Create worktree
+    const createArgs = ["--branch", branch, "--base", base];
+    if (setup) createArgs.push("--setup");
+    if (context) createArgs.push("--context", context);
+    if (contextFile) createArgs.push("--context-file", contextFile);
+    const created = await cmdCreate(createArgs);
+    worktreePath = created.worktree;
+  }
+
+  // Seed feature-request.md if context was provided and --skip-sandbox (create handles it otherwise)
+  if (skipSandbox) {
+    if (context) {
+      fs.writeFileSync(
+        path.join(worktreePath, "feature-request.md"),
+        context + "\n",
+      );
+      console.log("Seeded feature-request.md from --context");
+    } else if (contextFile) {
+      if (!fs.existsSync(contextFile))
+        die(`Context file not found: ${contextFile}`);
+      fs.copyFileSync(contextFile, path.join(worktreePath, "feature-request.md"));
+      console.log(`Seeded feature-request.md from ${contextFile}`);
+    }
   }
 
   // If --ralph, seed from --idea if needed and start the ralph loop
@@ -723,6 +969,11 @@ async function cmdStart(args: string[]): Promise<void> {
     if (headless) ralphArgs.push("--headless");
     await cmdRalph(ralphArgs);
     return;
+  }
+
+  // Validate that we have enough info to launch (role or idea required)
+  if (!ralph && !role && !idea) {
+    die("Must provide --role or --idea for interactive mode.");
   }
 
   // Determine starting prompt
@@ -783,7 +1034,7 @@ Write ONLY the system prompt content, no preamble or explanation. The prompt sho
       : `You are starting a new session. Your task: ${idea}. Begin working on this immediately. Create small, committed increments of progress.`;
 
     const logFd = fs.openSync(logFile, "w");
-    const env = { ...process.env, SANDBOX_DIR: worktreePath };
+    const env: Record<string, string | undefined> = { ...process.env, SANDBOX_DIR: worktreePath };
     delete env.CLAUDECODE;
 
     const child = spawn(
@@ -870,7 +1121,7 @@ Write ONLY the system prompt content, no preamble or explanation. The prompt sho
       path.join(worktreePath, startPrompt),
       "utf-8",
     );
-    const env = { ...process.env, SANDBOX_DIR: worktreePath };
+    const env: Record<string, string | undefined> = { ...process.env, SANDBOX_DIR: worktreePath };
     delete env.CLAUDECODE;
 
     spawnSync(
@@ -889,6 +1140,8 @@ async function cmdRalph(args: string[]): Promise<void> {
   let model = "sonnet";
   let headless = false;
   let startWithReview = false;
+  let noAgents = false;
+  let composerSession = "";
 
   let i = 0;
   while (i < args.length) {
@@ -913,12 +1166,25 @@ async function cmdRalph(args: string[]): Promise<void> {
         startWithReview = true;
         i++;
         break;
+      case "--no-agents":
+        noAgents = true;
+        i++;
+        break;
+      case "--composer-session":
+        composerSession = args[++i] ?? "";
+        i++;
+        break;
       default:
-        die(`Unknown option for ralph: ${args[i]}`);
+        die(`Unknown option for ralph: ${args[i]}`, ["Run 'sandbox --help' for usage."]);
     }
   }
 
   if (!branch) die("Must provide --branch");
+
+  // Force no-agents mode when headless or non-TTY (agents need interactive terminal)
+  if (headless || !process.stdin.isTTY) {
+    noAgents = true;
+  }
 
   const state = readState(branch);
   const worktree = state.worktree;
@@ -994,27 +1260,66 @@ async function cmdRalph(args: string[]): Promise<void> {
       }
 
       const devLog = path.join(worktree, `ralph-dev-${iteration}.log`);
-      console.log(
-        `  \x1b[2mcd ${worktree} && claude -p --system-prompt-file prompts/developer.md --model ${model} --dangerously-skip-permissions "..."\x1b[0m`,
-      );
       console.log(`  \x1b[2mlog: ${devLog}\x1b[0m`);
-      const devResult = await runAgentWithTimer(
-        "dev",
-        [
-          "-p",
-          "--verbose",
-          "--output-format",
-          "stream-json",
-          "--system-prompt-file",
-          "prompts/developer.md",
-          "--model",
-          model,
-          "--dangerously-skip-permissions",
-          devInstruction,
-        ],
-        worktree,
-        devLog,
-      );
+
+      let devResult: "done" | "stopped";
+      let devSessionId: string;
+      if (noAgents) {
+        // Automated: -p + stream-json, agent tools disabled
+        console.log(
+          `  \x1b[2mcd ${worktree} && claude -p --system-prompt-file prompts/developer_single.md --model ${model} --dangerously-skip-permissions --no-agents "..."\x1b[0m`,
+        );
+        ({ result: devResult, sessionId: devSessionId } = await runAgentWithTimer(
+          "dev",
+          [
+            "-p",
+            "--verbose",
+            "--output-format",
+            "stream-json",
+            "--system-prompt-file",
+            "prompts/developer_single.md",
+            "--model",
+            model,
+            "--dangerously-skip-permissions",
+            "--disallowedTools",
+            "Agent,TeamCreate,SendMessage",
+            devInstruction,
+          ],
+          worktree,
+          devLog,
+        ));
+      } else {
+        // Interactive: agents enabled, tee output to log + terminal
+        console.log(
+          `  \x1b[2mcd ${worktree} && claude --system-prompt-file prompts/developer.md --model ${model} --dangerously-skip-permissions "..."\x1b[0m`,
+        );
+        ({ result: devResult, sessionId: devSessionId } = await runInteractiveAgentWithLog(
+          "dev",
+          [
+            "--system-prompt-file",
+            "prompts/developer.md",
+            "--model",
+            model,
+            "--dangerously-skip-permissions",
+            devInstruction,
+          ],
+          worktree,
+          devLog,
+        ));
+      }
+
+      if (composerSession) {
+        addClaudeSession(composerSession, {
+          claudeSessionId: devSessionId,
+          stepIndex: -1,
+          stepLabel: `ralph dev iter ${iteration}`,
+          stepType: "ralph",
+          projectDir: worktree,
+          startedAt: new Date().toISOString(),
+          ralphIteration: iteration,
+          ralphPhase: "dev",
+        });
+      }
 
       generateReadableLog(devLog);
 
@@ -1037,7 +1342,7 @@ async function cmdRalph(args: string[]): Promise<void> {
       `  \x1b[2mcd ${worktree} && claude -p --system-prompt-file prompts/reviewer.md --model ${model} --dangerously-skip-permissions "..."\x1b[0m`,
     );
     console.log(`  \x1b[2mlog: ${revLog}\x1b[0m`);
-    const revResult = await runAgentWithTimer(
+    const { result: revResult, sessionId: revSessionId } = await runAgentWithTimer(
       "rev",
       [
         "-p",
@@ -1054,6 +1359,19 @@ async function cmdRalph(args: string[]): Promise<void> {
       worktree,
       revLog,
     );
+
+    if (composerSession) {
+      addClaudeSession(composerSession, {
+        claudeSessionId: revSessionId,
+        stepIndex: -1,
+        stepLabel: `ralph rev iter ${iteration}`,
+        stepType: "ralph",
+        projectDir: worktree,
+        startedAt: new Date().toISOString(),
+        ralphIteration: iteration,
+        ralphPhase: "rev",
+      });
+    }
 
     generateReadableLog(revLog);
 
@@ -1124,6 +1442,17 @@ async function cmdRalph(args: string[]): Promise<void> {
       fs.appendFileSync(
         ralphLog,
         `Iteration ${iteration}: auto-continue (headless)\n`,
+      );
+      continue;
+    }
+
+    // Auto-advance: composer signals via file in the worktree
+    const autoAdvancePath = path.join(worktree, ".ralph-auto-advance");
+    if (fs.existsSync(autoAdvancePath)) {
+      console.log("Auto-advance enabled — continuing...");
+      fs.appendFileSync(
+        ralphLog,
+        `Iteration ${iteration}: auto-continue (auto-advance)\n`,
       );
       continue;
     }
@@ -1204,6 +1533,9 @@ async function cmdRalph(args: string[]): Promise<void> {
     }
   }
 
+  // Clean up auto-advance signal file
+  try { fs.unlinkSync(path.join(worktree, ".ralph-auto-advance")); } catch {}
+
   // Print audit summary to stdout
   generateAuditSummary(worktree);
 }
@@ -1226,7 +1558,7 @@ async function cmdDistill(args: string[]): Promise<void> {
         i++;
         break;
       default:
-        die(`Unknown option for distill: ${args[i]}`);
+        die(`Unknown option for distill: ${args[i]}`, ["Run 'sandbox --help' for usage."]);
     }
   }
 
@@ -1261,11 +1593,84 @@ async function cmdDistill(args: string[]): Promise<void> {
 // ============================================================
 
 async function main(): Promise<void> {
+  migrateConfigDir();
   const args = process.argv.slice(2);
-  if (args.length === 0) {
-    die(
-      "Usage: sandbox <create|start|ralph|distill|status|cleanup|list|roles> [options]",
-    );
+  if (args.length === 0 || args[0] === "--help" || args[0] === "-h") {
+    console.log(`
+  sandbox — Manage isolated worktree sandboxes
+
+  Commands:
+    start <opts>       Create sandbox & launch Claude session
+    ralph <opts>       Automated dev/review loop in sandbox
+    list               Show all sandboxes
+    status <target>    Show detailed status of a sandbox
+    clean <target>     Remove sandbox (worktree, branch, state)
+    roles              List available prompt roles
+    create <opts>      Create a sandbox without launching Claude
+    distill <opts>     Distill feature request from sandbox
+
+  Start options:
+    --role <name>        Role to run (e.g. analyst, architect, developer)
+    --idea <text>        Auto-generate role from idea description
+    --context <text>     Context string seeded as feature-request.md
+    --context-file <f>   Read context from file
+    --branch <name>      Custom branch name (default: auto-generated)
+    --base <branch>      Base branch (default: master)
+    --model <model>      Model to use (default: opus)
+    --headless           Run without interactive terminal
+    --ralph              Start in automated dev/review mode
+    --max-iterations <n> Max dev/review iterations (default: 10)
+    --setup              Run full yarn predev (default: symlink node_modules)
+    --skip-sandbox       Reuse existing sandbox (requires --branch)
+
+  Create options:
+    --branch <name>      Custom branch name (default: auto-generated)
+    --base <branch>      Base branch (default: master)
+    --context <text>     Context string seeded as feature-request.md
+    --context-file <f>   Read context from file
+    --setup              Run full yarn predev (default: symlink node_modules)
+
+  Ralph options:
+    --branch <name>      Branch to run on (required)
+    --max-iterations <n> Max iterations (default: 10)
+    --model <model>      Model to use (default: opus)
+    --headless           Run without interactive terminal
+    --review             Start with review step instead of dev
+    --no-agents          Disable agent teams (fully automated, -p mode)
+
+  Status options:
+    <short-id>           Lookup by short ID
+    --branch <name>      Lookup by branch name
+    --id <slug>          Lookup by slug
+
+  Clean targets:
+    <short-id>           Clean by short ID (from 'sandbox list')
+    --branch <name>      Clean by branch name
+    --all                Clean all sandboxes
+    --stopped            Clean stopped sandboxes
+    --missing            Clean sandboxes with missing worktrees
+    --active             Clean active sandboxes
+    --running            Clean running sandboxes
+    --orphans            Clean orphaned worktree dirs (no state file)
+    --keep-branch        Keep the git branch after cleanup
+    --force              Skip confirmation prompts
+
+  Distill options:
+    --branch <name>      Branch to distill from (required)
+    --model <model>      Model to use (default: sonnet)
+
+  Examples:
+    sandbox start --role architect --context "Add caching"
+    sandbox start --ralph --context "Fix login bug" --max-iterations 5
+    sandbox start --idea "Add dark mode support"
+    sandbox ralph --branch users/you/worktree-a1b2
+    sandbox list
+    sandbox status a1b2
+    sandbox clean a1b2
+    sandbox clean --stopped
+    sandbox clean --all --force
+`);
+    process.exit(0);
   }
 
   const command = args[0];
@@ -1287,8 +1692,9 @@ async function main(): Promise<void> {
     case "status":
       cmdStatus(rest);
       break;
+    case "clean":
     case "cleanup":
-      await cmdCleanup(rest);
+      await cmdClean(rest);
       break;
     case "list":
       cmdList();
@@ -1298,7 +1704,10 @@ async function main(): Promise<void> {
       break;
     default:
       die(
-        `Unknown command: ${command}. Use: create, start, ralph, distill, status, cleanup, list, roles`,
+        `Unknown command: '${command}'.`, [
+          "Available: start, list, status, clean, ralph, create, distill, roles",
+          "Run 'sandbox --help' for usage.",
+        ],
       );
   }
 }

@@ -7,9 +7,12 @@ import {
   cmdResume,
   cmdSessions,
   cmdClean,
+  cmdReport,
+  cmdDistill,
 } from "./commands.js";
 import { currentSession, writeState, listStateSessions } from "./state.js";
 import { cleanupAllTempFiles } from "./execution.js";
+import { migrateConfigDir } from "../shared/paths.js";
 import * as ui from "./ui.js";
 
 // ── Welcome screen ──────────────────────────────────────────
@@ -34,24 +37,21 @@ function printWelcome(): void {
 
   const subtitle = `Orchestrate sandbox workflow compositions`;
 
-  console.log("");
-  console.log(ui.dim(`  ╔${"═".repeat(w)}╗`));
-  console.log(ui.dim(`  ║`) + " ".repeat(w) + ui.dim(`║`));
-  for (const line of logo) {
-    const vis = line.length;
-    const right = w - vis;
-    console.log(
-      ui.dim(`  ║`) +
-        ui.bold(ui.cyan(line)) +
-        " ".repeat(Math.max(0, right)) +
-        ui.dim(`║`),
-    );
-  }
-  console.log(ui.dim(`  ║`) + " ".repeat(w) + ui.dim(`║`));
-  console.log(ui.dim(`  ║`) + pad(ui.dim(subtitle), w) + ui.dim(`║`));
-  console.log(ui.dim(`  ║`) + " ".repeat(w) + ui.dim(`║`));
-  console.log(ui.dim(`  ╚${"═".repeat(w)}╝`));
-  console.log("");
+  const boxLines = [
+    "",
+    ui.dim(`  ╔${"═".repeat(w)}╗`),
+    ui.dim(`  ║`) + " ".repeat(w) + ui.dim(`║`),
+    ...logo.map(line => {
+      const right = w - line.length;
+      return ui.dim(`  ║`) + ui.bold(ui.cyan(line)) + " ".repeat(Math.max(0, right)) + ui.dim(`║`);
+    }),
+    ui.dim(`  ║`) + " ".repeat(w) + ui.dim(`║`),
+    ui.dim(`  ║`) + pad(ui.dim(subtitle), w) + ui.dim(`║`),
+    ui.dim(`  ║`) + " ".repeat(w) + ui.dim(`║`),
+    ui.dim(`  ╚${"═".repeat(w)}╝`),
+    "",
+  ];
+  console.log(boxLines.join("\n"));
 
   // Show active sessions summary
   const sessions = listStateSessions();
@@ -83,124 +83,83 @@ function printWelcome(): void {
     console.log("");
   }
 
-  // Quick start
-  console.log(ui.bold("  Quick start:"));
-  console.log(
+  console.log([
+    ui.bold("  Quick start:"),
     `    ${ui.cyan("composer compose full --ado 12345")}        ${ui.dim("Full workflow from ADO item")}`,
-  );
-  console.log(
     `    ${ui.cyan('composer compose ralph-only --context "..."')} ${ui.dim("Automated dev/review")}`,
-  );
-  console.log(
     `    ${ui.cyan("composer compose role --role architect")}    ${ui.dim("Single role session")}`,
-  );
-  console.log("");
-
-  // Commands
-  console.log(ui.bold("  Commands:"));
-  console.log(
+    "",
+    ui.bold("  Commands:"),
     `    ${ui.cyan("compose")} <type> [opts]   Start a new composition`,
-  );
-  console.log(
     `    ${ui.cyan("resume")} <session-id>     Resume a paused session`,
-  );
-  console.log(`    ${ui.cyan("sessions")}                Show all sessions`);
-  console.log(
+    `    ${ui.cyan("sessions")}                Show all sessions`,
     `    ${ui.cyan("list")}                    List composition types`,
-  );
-  console.log(`    ${ui.cyan("clean")} <target>          Remove session state`);
-  console.log(`    ${ui.cyan("--help")}                  Full usage details`);
-  console.log("");
+    `    ${ui.cyan("clean")} <target>          Remove session state`,
+    `    ${ui.cyan("report")} [session-id]    Generate metrics report for a session`,
+    `    ${ui.cyan("distill")} [session-id]   Distill feature request from session artifacts`,
+    `    ${ui.cyan("--help")}                  Full usage details`,
+    "",
+  ].join("\n"));
 }
 
 // ── Full help ───────────────────────────────────────────────
 
 function printHelp(): void {
-  console.log(
+  console.log([
     `${ui.bold("composer")} — Orchestrate sandbox workflow compositions`,
-  );
-  console.log("");
-  console.log(`${ui.bold("Usage:")} composer <command> [options]`);
-  console.log("");
-  console.log(`${ui.bold("Commands:")}`);
-  console.log(
+    "",
+    `${ui.bold("Usage:")} composer <command> [options]`,
+    "",
+    ui.bold("Commands:"),
     `  list                                 List available composition types`,
-  );
-  console.log(
     `  compose <type> [options]              Start a new composition`,
-  );
-  console.log(
     `  resume <session-id>                   Resume a paused/in-progress session`,
-  );
-  console.log(
     `  sessions                              Show all composer sessions`,
-  );
-  console.log(`  clean <id|--all|--completed|--stale>  Remove session state`);
-  console.log("");
-  console.log(`${ui.bold("Compose options:")}`);
-  console.log(`  --context "..."                       Inline context string`);
-  console.log(
+    `  clean <id|--all|--completed|--stale>  Remove session state`,
+    `  report [session-id] [--json|--text]   Generate metrics report`,
+    `  distill [session-id] [options]        Distill feature request from artifacts`,
+    "",
+    ui.bold("Compose options:"),
+    `  --context "..."                       Inline context string`,
     `  --context-file <path>                 Read context from a file`,
-  );
-  console.log(
     `  --ado <work-item-id>                  Fetch context from Azure DevOps`,
-  );
-  console.log(
     `  --model <model>                       Model to use (default: opus)`,
-  );
-  console.log(
     `  --max-iterations <n>                  Max dev/review iterations (default: 5)`,
-  );
-  console.log(
     `  --role <name>                         Role to run (required for 'role' composition)`,
-  );
-  console.log(
     `  --name <session-name>                 Use a custom session name instead of auto-generated`,
-  );
-  console.log(
-    `  --no-tmux                             Don't auto-launch in a tmux window`,
-  );
-  console.log("");
-  console.log(`${ui.bold("Composition types:")}`);
-  console.log(
+    `  --skip-sandbox                        Skip sandbox creation, run on current branch`,
+    "",
+    ui.bold("Distill options:"),
+    `  --model <model>                       Model to use (default: sonnet)`,
+    `  --from-impl                           Generate from actual implementation (code diff)`,
+    "",
+    ui.bold("Composition types:"),
     `  full          analyst → architect → ralph (dev/review loop) → PR`,
-  );
-  console.log(`  ralph-only    sandbox → ralph (automated dev/review) → PR`);
-  console.log(
+    `  ralph-only    sandbox → ralph (automated dev/review) → PR`,
     `  manual        analyst → architect → developer → reviewer → PR`,
-  );
-  console.log(
     `  role          sandbox → single role session → PR  ${ui.dim("(requires --role)")}`,
-  );
-  console.log(`  headless      background developer → status check → PR`);
-  console.log("");
-  console.log(`${ui.bold("Examples:")}`);
-  console.log(`  composer list`);
-  console.log(`  composer compose full --ado 12345`);
-  console.log(`  composer compose ralph-only --context "Fix the login button"`);
-  console.log(
+    `  headless      background developer → status check → PR`,
+    "",
+    ui.bold("Examples:"),
+    `  composer list`,
+    `  composer compose full --ado 12345`,
+    `  composer compose ralph-only --context "Fix the login button"`,
     `  composer compose role --role architect --context "Design caching layer"`,
-  );
-  console.log(`  composer compose full --ado 12345 --name my-feature`);
-  console.log(`  composer resume a1b2`);
-  console.log(`  composer clean --completed`);
+    `  composer compose full --ado 12345 --name my-feature`,
+    `  composer resume a1b2`,
+    `  composer clean --completed`,
+    `  composer distill                                        ${ui.dim("# distill latest session")}`,
+    `  composer distill a1b2 --from-impl                      ${ui.dim("# from actual code changes")}`,
+  ].join("\n"));
 }
 
 function installSignalHandlers(): void {
   const handler = (signal: string) => {
-    console.log("");
     if (currentSession) {
       currentSession.status = "paused";
       writeState(currentSession);
-      console.log("");
-      ui.warn(`Caught ${signal} — saving session state.`);
       const shortId = currentSession.sessionId.slice(-4);
-      console.log(
-        `  Session ${currentSession.sessionId} paused at step ${currentSession.currentStep + 1}.`,
-      );
-      console.log(
-        `  Resume with: ${ui.cyan(`composer resume ${shortId}`)}`,
-      );
+      console.log(`\n\n${ui.yellow("⚠")} Caught ${signal} — saving session state.\n  Session ${currentSession.sessionId} paused at step ${currentSession.currentStep + 1}.\n  Resume with: ${ui.cyan(`composer resume ${shortId}`)}`);
     }
     cleanupAllTempFiles();
     process.exit(130);
@@ -211,6 +170,7 @@ function installSignalHandlers(): void {
 }
 
 async function main(): Promise<void> {
+  migrateConfigDir();
   installSignalHandlers();
 
   const args = process.argv.slice(2);
@@ -244,22 +204,38 @@ async function main(): Promise<void> {
     case "clean":
       await cmdClean(rest);
       break;
+    case "report":
+      await cmdReport(rest);
+      break;
+    case "distill":
+      await cmdDistill(rest);
+      break;
     default:
-      console.error("");
-      console.error(
+      console.error([
+        "",
         `  ${ui.red(ui.bold("ERROR:"))} Unknown command '${command}'.`,
-      );
-      console.error("");
-      console.error(`  ${ui.yellow("Suggestions:")}`);
-      console.error(
-        `    ${ui.yellow("1.")} Available commands: list, compose, resume, sessions, clean`,
-      );
-      console.error(
+        "",
+        `  ${ui.yellow("Suggestions:")}`,
+        `    ${ui.yellow("1.")} Available commands: list, compose, resume, sessions, clean, report, distill`,
         `    ${ui.yellow("2.")} Run 'composer --help' for full usage.`,
-      );
-      console.error("");
+        "",
+      ].join("\n"));
       process.exit(1);
   }
 }
 
-main();
+main().catch((err: unknown) => {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (msg.includes("Could not find a git repository")) {
+    console.error([
+      "",
+      `  ${ui.red(ui.bold("ERROR:"))} Not a git repository.`,
+      "",
+      `  Composer must be run from within a git repository.`,
+      `  ${ui.dim("cd into your project directory and try again.")}`,
+      "",
+    ].join("\n"));
+    process.exit(1);
+  }
+  throw err;
+});

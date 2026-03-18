@@ -233,6 +233,194 @@ ${improved}`;
   });
 }
 
+const IMPL_DISTILL_PROMPT = `You are a prompt engineer. You have access to:
+
+1. feature-request.md — the original user request
+2. requirements.md — clarified requirements (if available)
+3. spec.md — technical specification (if available)
+4. A code diff showing the actual implementation
+
+Your task: Write the PERFECT feature request that, if given to a developer with no prior context, would lead them to produce exactly this implementation on the first try. Think of this as: "what should the user have written to get this result without iteration?"
+
+Study the code diff to understand what was actually built. The implementation is the source of truth — the original planning documents may have been incomplete, vague, or wrong in places. Learn from the code what the real requirements and design decisions turned out to be.
+
+The output should read as a forward-looking feature request — as if no code has been written yet. It should be detailed enough that:
+- An analyst reading it would have zero clarifying questions
+- An architect reading it would have zero design decisions to make
+- A developer could go straight to implementation and get it right
+
+Rules:
+- Write entirely in future tense / imperative mood ("The system should...", "Add a...", "When the user...")
+- NEVER reference the implementation, the code diff, or what was built — this is a feature request, not a retrospective
+- NEVER use phrases like "was implemented", "diverged from spec", "was not done", "was added beyond the spec", "the code shows", etc.
+- Include specific technical choices (e.g. "use spawnSync, not exec", "store state as JSON on disk")
+- Include scope boundaries (what's in, what's explicitly out)
+- Include non-functional requirements (performance, error handling, edge cases)
+- Include integration points and constraints that a developer would need to know
+- Write in the same voice/style as the original feature-request.md
+- Do NOT include raw file paths or function names — describe behavior and capabilities
+- Keep it as a single markdown document, ~2-4x the length of the original feature request
+- Start with a # heading
+
+Output ONLY the feature request content, no preamble.`;
+
+/**
+ * Generate a feature request that reflects the actual implementation,
+ * by reading the code diff alongside the original planning artifacts.
+ *
+ * Shows a progress indicator while running. Press 's' to skip.
+ * Returns the generated content, or null if prerequisites are missing or skipped.
+ * Writes the result to {worktree}/implementation-feature-request.md on success.
+ */
+export async function generateImplementationFeatureRequest(
+  worktree: string,
+  model: string = "sonnet",
+  baseBranch: string = "master",
+): Promise<string | null> {
+  const featureRequestPath = path.join(worktree, "feature-request.md");
+  const requirementsPath = path.join(worktree, "requirements.md");
+  const specPath = path.join(worktree, "spec.md");
+
+  const featureRequest = fs.existsSync(featureRequestPath)
+    ? fs.readFileSync(featureRequestPath, "utf-8")
+    : "(No original feature request found)";
+  const requirements = fs.existsSync(requirementsPath)
+    ? fs.readFileSync(requirementsPath, "utf-8")
+    : "(No requirements document found)";
+  const spec = fs.existsSync(specPath)
+    ? fs.readFileSync(specPath, "utf-8")
+    : "(No spec document found)";
+
+  // Get the actual code diff
+  const { spawnSync } = await import("node:child_process");
+  const diffResult = spawnSync(
+    "git",
+    ["-C", worktree, "diff", `origin/${baseBranch}...HEAD`, "--stat"],
+    { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] },
+  );
+  const diffStat = (diffResult.stdout ?? "").trim();
+
+  if (!diffStat) {
+    return null;
+  }
+
+  // Get the full diff, capped to avoid token explosion
+  const fullDiffResult = spawnSync(
+    "git",
+    ["-C", worktree, "diff", `origin/${baseBranch}...HEAD`],
+    { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 1024 * 1024 },
+  );
+  let codeDiff = (fullDiffResult.stdout ?? "").trim();
+  const MAX_DIFF_CHARS = 80_000;
+  if (codeDiff.length > MAX_DIFF_CHARS) {
+    codeDiff = codeDiff.slice(0, MAX_DIFF_CHARS) + "\n\n[... diff truncated ...]";
+  }
+
+  const fullPrompt = `${IMPL_DISTILL_PROMPT}
+
+--- feature-request.md ---
+${featureRequest}
+
+--- requirements.md ---
+${requirements}
+
+--- spec.md ---
+${spec}
+
+--- Code diff (git diff origin/${baseBranch}...HEAD) ---
+${codeDiff}`;
+
+  const child = spawn("claude", ["-p", "--model", model, fullPrompt], {
+    cwd: worktree,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  const start = Date.now();
+  let stdout = "";
+  let stderr = "";
+
+  child.stdout?.on("data", (chunk: Buffer) => {
+    stdout += chunk.toString();
+  });
+  child.stderr?.on("data", (chunk: Buffer) => {
+    stderr += chunk.toString();
+  });
+
+  // Enable raw mode to capture keypresses
+  if (process.stdin.isTTY) {
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+  }
+
+  return new Promise(resolve => {
+    let skipped = false;
+
+    const onData = (data: Buffer): void => {
+      const key = data.toString();
+      if (key === "s" || key === "S") {
+        skipped = true;
+        process.stdout.write(
+          `\r\x1b[K  [distill] \u26a0 Skipping...\n`,
+        );
+        child.kill();
+      }
+    };
+    if (process.stdin.isTTY) {
+      process.stdin.on("data", onData);
+    }
+
+    const timer = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - start) / 1000);
+      const min = Math.floor(elapsed / 60);
+      const sec = elapsed % 60;
+      const time = `${min}m${String(sec).padStart(2, "0")}s`;
+      process.stdout.write(
+        `\r\x1b[K  [distill] \u23f3 ${time}  \x1b[2m(s=skip)\x1b[0m`,
+      );
+    }, 2000);
+
+    child.on("exit", (code) => {
+      clearInterval(timer);
+      if (process.stdin.isTTY) {
+        process.stdin.removeListener("data", onData);
+        process.stdin.setRawMode(false);
+        process.stdin.pause();
+      }
+
+      if (skipped) {
+        resolve(null);
+        return;
+      }
+
+      const elapsed = Math.floor((Date.now() - start) / 1000);
+      const min = Math.floor(elapsed / 60);
+      const sec = elapsed % 60;
+      process.stdout.write(
+        `\r\x1b[K  [distill] \u2705 done in ${min}m${String(sec).padStart(2, "0")}s\n`,
+      );
+
+      if (code !== 0) {
+        console.error(
+          `Failed to generate implementation feature request: ${stderr.trim()}`,
+        );
+        resolve(null);
+        return;
+      }
+
+      const content = stdout.trim();
+      if (!content) {
+        resolve(null);
+        return;
+      }
+
+      const outputPath = path.join(worktree, "implementation-feature-request.md");
+      fs.writeFileSync(outputPath, content + "\n");
+
+      resolve(content);
+    });
+  });
+}
+
 /**
  * Print a banner with the generated improved feature request and reuse instructions.
  */

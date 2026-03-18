@@ -4,11 +4,6 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as readline from "node:readline";
 
-export function die(message: string): never {
-  console.error(`ERROR: ${message}`);
-  process.exit(1);
-}
-
 export function nowISO(): string {
   return new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
 }

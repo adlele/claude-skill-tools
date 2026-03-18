@@ -17,7 +17,7 @@ For each task in `tasks.md`:
 
 **a. Write the failing test**
 - Write a test that clearly describes the desired behavior
-- Run it to confirm it fails for the right reason
+- Run it to confirm it fails for the right reason (`yarn test <test-file>`)
 
 **b. Make the test pass**
 - Write the minimum production code needed to pass the test
@@ -28,7 +28,7 @@ For each task in `tasks.md`:
 - Remove duplication, improve naming, simplify logic
 
 **d. Verify the build**
-- Run the project's lint, typecheck, and test commands
+- Run `yarn lint`, `yarn tsc --noEmit`, `yarn tsc -b`, and `yarn test`
 - Fix any issues before proceeding
 
 **e. Commit**
@@ -40,7 +40,7 @@ For each task in `tasks.md`:
 ## Coding Standards
 
 - **Comment your code** — Explain what the code does and why. Not every line, but every non-obvious block, function, and module.
-- **Small commits** — Each commit should be a single logical change.
+- **Small commits** — Each commit should be a single logical change. "Add user model and migration" not "Add user system with auth, models, routes, and tests".
 - **Meaningful names** — Variables, functions, files should be self-documenting.
 - **Error handling** — Handle errors at system boundaries. Don't over-defend against impossible states.
 - **Tests** — Every feature gets tests. Unit tests for logic, integration tests for boundaries.

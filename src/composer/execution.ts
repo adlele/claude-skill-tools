@@ -22,6 +22,9 @@ import {
   generateImprovedFeatureRequest,
   printDistillBanner,
 } from "../sandbox/distill.js";
+import { parseComments, filterIgnored } from "../sandbox/ralph-helpers.js";
+import { deterministicSessionId } from "../metrics/uuid.js";
+import { addClaudeSession } from "../metrics/session-map.js";
 import * as ui from "./ui.js";
 
 // ── Temp file tracking ──────────────────────────────────────
@@ -48,7 +51,7 @@ function untrackTmpFile(filePath: string): void {
 
 // ── Template resolution ─────────────────────────────────────
 
-function resolveTemplate(
+export function resolveTemplate(
   cmd: string,
   vars: TemplateVars,
 ): { resolved: string; tmpFile?: string } {
@@ -63,7 +66,9 @@ function resolveTemplate(
     .replace(/\{model\}/g, vars.model)
     .replace(/\{max_iterations\}/g, String(vars.maxIterations))
     .replace(/\{ado_id\}/g, vars.adoId)
-    .replace(/\{role\}/g, vars.role);
+    .replace(/\{role\}/g, vars.role)
+    .replace(/\{base_branch\}/g, vars.baseBranch)
+    .replace(/\{claude_session_id\}/g, vars.claudeSessionId ?? "");
 
   // Write context to a temp file instead of inlining it into the shell command.
   // ADO/markdown content contains quotes, $, backticks, etc. that break bash parsing.
@@ -153,9 +158,8 @@ async function preCheckStep(
 ): Promise<boolean> {
   // Check worktree exists for non-start steps
   const startTypes: StepType[] = [
+    "sandbox-create",
     "sandbox-start",
-    "sandbox-start-ralph",
-    "sandbox-start-headless",
   ];
 
   if (
@@ -165,13 +169,13 @@ async function preCheckStep(
   ) {
     ui.errorBlock("Worktree directory missing", `Expected: ${vars.worktree}`, [
       "The worktree may have been deleted since this session was created.",
-      "Re-run step 1 (press 'p') or start fresh with 'composer clean'.",
+      "Re-run the sandbox creation step (press 'p') or start fresh with 'composer clean'.",
     ]);
     return false;
   }
 
   // Warn if PR step has no commits
-  if (stepType === "pr-create" || stepType === "pr-dry-run") {
+  if (stepType === "ado-pr-create" || stepType === "pr-dry-run") {
     if (vars.worktree && fs.existsSync(vars.worktree)) {
       const result = spawnSync(
         "git",
@@ -197,9 +201,9 @@ async function preCheckStep(
     if (!vars.branch || !vars.worktree) {
       ui.errorBlock(
         "Branch/worktree not captured yet",
-        "Step 1 may not have completed successfully.",
+        "The sandbox creation step may not have completed successfully.",
         [
-          "Use 'p' to go back and re-run step 1.",
+          "Use 'p' to go back and re-run the sandbox creation step.",
           "Use 'q' to quit and investigate.",
         ],
       );
@@ -230,12 +234,11 @@ function cleanupTmpFile(tmpFile?: string): void {
 
 // ── Step suggestions by type ────────────────────────────────
 
-function stepFailSuggestions(stepType: StepType, exitCode: number): string[] {
+export function stepFailSuggestions(stepType: StepType, exitCode: number): string[] {
   const common = [`Step exited with code ${exitCode}.`];
   switch (stepType) {
+    case "sandbox-create":
     case "sandbox-start":
-    case "sandbox-start-ralph":
-    case "sandbox-start-headless":
       return [
         ...common,
         "Check that the sandbox script exists and is executable.",
@@ -251,7 +254,7 @@ function stepFailSuggestions(stepType: StepType, exitCode: number): string[] {
         "Retry with 'n' or skip with 's'.",
       ];
     case "pr-dry-run":
-    case "pr-create":
+    case "ado-pr-create":
       return [
         ...common,
         "Verify the branch has commits (git log origin/master..HEAD).",
@@ -266,9 +269,8 @@ function stepFailSuggestions(stepType: StepType, exitCode: number): string[] {
 // ── Retry configuration ─────────────────────────────────────
 
 const RETRYABLE_TYPES: Set<StepType> = new Set([
+  "sandbox-create",
   "sandbox-start",
-  "sandbox-start-ralph",
-  "sandbox-start-headless",
   "claude-interactive",
   "ralph",
 ]);
@@ -302,8 +304,8 @@ async function executeStep(
     return 1;
   }
 
-  // Re-execution warning
-  if (state.stepTimings[stepIndex] > 0) {
+  // Re-execution warning (skip for autoAdvance steps — they should never prompt)
+  if (state.stepTimings[stepIndex] > 0 && !step.autoAdvance) {
     ui.warn(
       `This step was previously run (${ui.formatElapsed(state.stepTimings[stepIndex])}). ` +
         "Re-running may not be idempotent.",
@@ -315,12 +317,11 @@ async function executeStep(
   const t0 = Date.now();
 
   const startTypes: StepType[] = [
+    "sandbox-create",
     "sandbox-start",
-    "sandbox-start-ralph",
-    "sandbox-start-headless",
   ];
 
-  // Sandbox-start steps always run inline (need to capture branch/worktree)
+  // Sandbox-start/create steps always run inline (need to capture branch/worktree)
   if (startTypes.includes(step.type)) {
     const exitCode = runInline(resolvedCmd);
     const elapsed = Date.now() - t0;
@@ -358,10 +359,13 @@ async function executeStep(
     return exitCode;
   }
 
+  // Preview/info steps always run inline so output stays visible in the terminal
+  const inlineOnlyTypes: StepType[] = ["pr-dry-run", "status-check"];
+
   // Tmux mode
-  if (IN_TMUX && HAS_TMUX) {
+  if (IN_TMUX && HAS_TMUX && !inlineOnlyTypes.includes(step.type)) {
     const handle = runInTmux(resolvedCmd);
-    const rc = waitForTmuxOrSkip(handle);
+    const rc = waitForTmuxOrSkip(handle, vars.worktree || undefined);
     const elapsed = Date.now() - t0;
     state.stepTimings[stepIndex] = elapsed;
     cleanupTmpFile(tmpFile);
@@ -381,6 +385,7 @@ async function executeStep(
 export function showStatus(
   state: SessionState,
   composition: Composition,
+  skippedSteps?: Set<number>,
 ): void {
   ui.banner(`Status: ${state.composition}`, [
     ["Session", state.sessionId],
@@ -388,9 +393,51 @@ export function showStatus(
     ["Branch", state.branch || ui.dim("<pending>")],
     ["Worktree", state.worktree || ui.dim("<pending>")],
   ]);
+  ui.pipeline(composition.steps, state.currentStep, state.stepTimings, skippedSteps);
+}
+
+// ── Post-ralph comment check ─────────────────────────────────
+
+async function checkPendingComments(
+  vars: TemplateVars,
+  state: SessionState,
+): Promise<boolean> {
+  const commentsFile = path.join(vars.worktree, "comments.md");
+  const ignoredFile = path.join(vars.worktree, "ignored-comments.txt");
+
+  if (!fs.existsSync(commentsFile)) return false;
+
+  const allComments = parseComments(commentsFile);
+  const remaining = filterIgnored(allComments, ignoredFile);
+
+  if (remaining.length === 0) return false;
+
+  console.log(`\n  ${ui.yellow("⚠")} ${ui.bold(`${remaining.length} unresolved review comment(s) after ralph loop:`)}`);
+  remaining.forEach((c, idx) => {
+    console.log(`    ${ui.dim(`${idx + 1}.`)} ${c}`);
+  });
   console.log("");
-  ui.pipeline(composition.steps, state.currentStep, state.stepTimings);
+  console.log(`  ${ui.cyan("r <n>")}   Re-run ralph for n iterations (e.g. 'r 3')`);
+  console.log(`  ${ui.cyan("c")}       Continue to PR step anyway`);
   console.log("");
+
+  const input = await promptUser("  Action> ");
+  const trimmed = input.trim().toLowerCase();
+
+  if (trimmed.startsWith("r")) {
+    const nStr = trimmed.slice(1).trim();
+    const n = parseInt(nStr, 10);
+    if (!n || n < 1) {
+      console.log(`  ${ui.red("Invalid iteration count.")} Continuing to PR.`);
+      return false;
+    }
+    state.maxIterations = n;
+    vars.maxIterations = n;
+    console.log(`  ${ui.green("↻")} Re-running ralph with ${n} iteration(s)...`);
+    return true;
+  }
+
+  return false;
 }
 
 // ── Main composition loop ───────────────────────────────────
@@ -411,6 +458,7 @@ export async function runComposition(state: SessionState): Promise<void> {
     maxIterations: state.maxIterations,
     adoId: state.adoId,
     role: state.role || "",
+    baseBranch: state.baseBranch || "master",
   };
 
   // Resolve {role} placeholders in step labels so pipeline/status display correctly
@@ -421,34 +469,49 @@ export async function runComposition(state: SessionState): Promise<void> {
   };
 
   let currentStep = state.currentStep;
+  let hasPrompted = false; // Track whether user has seen a manual prompt
+  let failedAutoAdvance = false; // Set when autoAdvance step exhausts retries
+
+  // Track steps skipped by --skip-sandbox for pipeline display
+  const skippedSteps = new Set<number>();
+  if (state.skipSandbox) {
+    skippedSteps.add(0);
+  }
 
   while (currentStep < state.totalSteps) {
     const step = composition.steps[currentStep];
 
     // Show pipeline instead of progress bar
     ui.stepHeader(currentStep + 1, state.totalSteps, step.label);
-    console.log("");
-    ui.pipeline(composition.steps, currentStep, state.stepTimings);
-    console.log("");
+    ui.pipeline(composition.steps, currentStep, state.stepTimings, skippedSteps);
+
+    // Generate deterministic Claude session ID for interactive steps
+    if (step.type === "claude-interactive") {
+      const csId = deterministicSessionId(state.sessionId, currentStep);
+      vars.claudeSessionId = csId;
+    }
 
     // Show resolved command before prompt
     const preResolved = resolveStepCommand(step, vars);
-    console.log(`  ${ui.dim("Command:")} ${ui.dim(preResolved.resolved)}`);
-    console.log("");
+    console.log(`\n  ${ui.dim("Command:")} ${ui.dim(preResolved.resolved)}\n`);
 
-    // Auto-run with countdown for steps 2+; first step uses manual prompt
+    // Auto-advance steps proceed immediately; first human-facing step uses
+    // manual prompt; subsequent steps use countdown auto-run.
+    // failedAutoAdvance is set when an autoAdvance step exhausted retries —
+    // forces a manual prompt so the user can decide how to proceed.
     let cmd: string;
-    if (currentStep === 0) {
+    if (step.autoAdvance && !failedAutoAdvance) {
+      cmd = "n";
+    } else if (!hasPrompted) {
+      hasPrompted = true;
       ui.keyHints();
-      console.log("");
       const input = await promptUser(
-        `composer[${currentStep + 1}/${state.totalSteps}]> `,
+        `\ncomposer[${currentStep + 1}/${state.totalSteps}]> `,
       );
       cmd = (input || "n").trim().toLowerCase();
     } else {
       ui.keyHintsAutoRun();
-      console.log("");
-      cmd = await ui.countdown(3);
+      cmd = await ui.countdown(10);
     }
 
     switch (cmd) {
@@ -474,15 +537,41 @@ export async function runComposition(state: SessionState): Promise<void> {
         }
 
         if (rc === 0) {
+          failedAutoAdvance = false;
           currentStep++;
           state.currentStep = currentStep;
           writeState(state);
+
+          // Record claude-interactive sessions in durable map
+          if (step.type === "claude-interactive" && vars.claudeSessionId) {
+            addClaudeSession(state.sessionId, {
+              claudeSessionId: vars.claudeSessionId,
+              stepIndex: currentStep - 1,
+              stepLabel: step.label,
+              stepType: step.type,
+              projectDir: vars.worktree,
+              startedAt: new Date().toISOString(),
+            });
+          }
+
           // Named step result
           ui.stepResult(
             true,
             `${step.label} completed`,
             state.stepTimings[currentStep - 1],
           );
+
+          // After ralph, check for unresolved comments before advancing to PR
+          if (step.type === "ralph" && vars.worktree) {
+            const shouldRerun = await checkPendingComments(vars, state);
+            if (shouldRerun) {
+              // Re-run ralph step instead of advancing
+              currentStep--;
+              state.currentStep = currentStep;
+              writeState(state);
+              hasPrompted = false;
+            }
+          }
 
           // Auto-distill after claude-interactive steps (architect phase)
           if (step.type === "claude-interactive" && vars.worktree) {
@@ -501,13 +590,18 @@ export async function runComposition(state: SessionState): Promise<void> {
             undefined,
             stepFailSuggestions(step.type, rc),
           );
+          // After failure, show manual prompt on next iteration so user can
+          // decide how to proceed (retry/skip/quit) instead of auto-countdown
+          hasPrompted = false;
+          if (step.autoAdvance) failedAutoAdvance = true;
         }
         break;
       }
 
       case "p": {
         cleanupTmpFile(preResolved.tmpFile);
-        if (currentStep > 0) {
+        const minStep = state.skipSandbox ? 1 : 0;
+        if (currentStep > minStep) {
           currentStep--;
           state.currentStep = currentStep;
           writeState(state);
@@ -532,12 +626,8 @@ export async function runComposition(state: SessionState): Promise<void> {
         state.currentStep = currentStep;
         state.status = "paused";
         writeState(state);
-        console.log("");
-        console.log(`  Composition paused at step ${currentStep + 1}.`);
         const shortId = state.sessionId.slice(-4);
-        console.log(
-          `  Resume with: ${ui.cyan(`composer resume ${shortId}`)}`,
-        );
+        console.log(`\n  Composition paused at step ${currentStep + 1}.\n  Resume with: ${ui.cyan(`composer resume ${shortId}`)}`);
         setCurrentSession(null);
         process.exit(0);
         break; // unreachable, but satisfies no-fallthrough lint
@@ -546,7 +636,7 @@ export async function runComposition(state: SessionState): Promise<void> {
       case "?":
       case "status": {
         cleanupTmpFile(preResolved.tmpFile);
-        showStatus(state, composition);
+        showStatus(state, composition, skippedSteps);
         break;
       }
 
@@ -570,8 +660,7 @@ export async function runComposition(state: SessionState): Promise<void> {
   ui.banner(ui.green("Composition Complete"), fields);
 
   // Per-step timing breakdown
-  console.log("");
-  ui.pipeline(composition.steps, state.totalSteps, state.stepTimings);
+  ui.pipeline(composition.steps, state.totalSteps, state.stepTimings, skippedSteps);
 
   state.status = "completed";
   writeState(state);
@@ -589,13 +678,7 @@ async function tryDistillImprovedFeatureRequest(
     return;
   }
 
-  console.log("");
-  console.log(
-    `  ${ui.yellow("⚗")}  ${ui.yellow("Auto-distilling improved feature request...")}`,
-  );
-  console.log(
-    `  ${ui.dim("   Sending feature-request.md + requirements.md + spec.md to Claude")}`,
-  );
+  console.log(`\n  ${ui.yellow("⚗")}  ${ui.yellow("Auto-distilling improved feature request...")}\n  ${ui.dim("   Sending feature-request.md + requirements.md + spec.md to Claude")}`);
 
   const content = await generateImprovedFeatureRequest(worktree, model);
 

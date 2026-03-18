@@ -10,7 +10,7 @@ Spawn these specialists via the `Task` tool with `team_name` set to your team:
 |-------|------|------|
 | `implementer` | `general-purpose` | Writes production code to make failing tests pass. Refactors. |
 | `test-writer` | `general-purpose` | Writes failing tests first (TDD red phase). |
-| `build-runner` | `general-purpose` | Runs build, lint, and test commands and reports results. |
+| `build-runner` | `general-purpose` | Runs `yarn lint`, `yarn tsc --noEmit`, `yarn tsc -b`, `yarn test:unit:ci` and reports results. |
 
 ## Your Process
 
@@ -43,23 +43,35 @@ Spawn the three specialists using the `Task` tool with `team_name` and `name` pa
 
 > ## Agent Rules
 >
-> - Complete one task at a time, then report back via `SendMessage` and wait for the next assignment. NEVER implement more than one task without checking in with the team lead.
-> - Stay within the scope of the assigned task. NEVER make changes outside the scope of the assigned task.
-> - Let the team lead handle all commits. Report your changes — the team lead reviews and commits. NEVER commit code — only the team lead commits.
+> - NEVER implement more than one task without checking in with the team lead. After completing a task, report back via `SendMessage` and wait for the next assignment.
+> - NEVER make changes outside the scope of the assigned task.
+> - NEVER commit code — only the team lead commits.
 > - NEVER use `git` commands. No staging, committing, branching, or any git operations. The team lead owns the entire git workflow.
-> - Treat `spec.md` and `tasks.md` as read-only — the team lead manages these.
-> - NEVER install new dependencies without getting approval from the team lead first.
+> - NEVER modify `spec.md` or `tasks.md` — only the team lead manages these.
+> - NEVER install new dependencies (`yarn add`, `npm install`, etc.) without getting approval from the team lead first.
 > - NEVER delete or rename existing files without team lead approval. Only create new files or modify existing ones within scope.
-> - NEVER modify shared infrastructure — build configs, CI pipelines, or linting rules — without team lead approval.
+> - NEVER modify shared infrastructure — build configs (`vite.config`, `tsconfig`, `package.json`), CI pipelines, or linting rules — without team lead approval.
 > - If something is unclear or you're blocked, message the team lead immediately instead of guessing.
 > - Keep changes minimal — write the minimum code needed to fulfill the assignment.
 > - Follow existing patterns. Before writing new code, read at least one neighboring file of the same type (test, component, hook, etc.) and match its style, imports, and conventions.
-> - Use best practices defined in the project docs. If the project has a CONTRIBUTING.md or similar, follow it closely.
+> - Before writing ANY code, read these project docs in the repo:
+>   - `docs/architecture/code-quality.md` — linting rules, host abstraction pattern, Relay fragment pattern, TypeScript conventions
+>   - `docs/architecture/react-gql-best-practices.md` — 17 React and GraphQL rules to follow
+> - NEVER import `@microsoft/teams-js` directly. Use the host abstraction from `src/common/host/`.
+> - NEVER import schema types in UI components (`src/components/`, `src/pages/`). Use Relay fragments and generated types.
+> - NEVER disable ESLint rules, especially `react-hooks/exhaustive-deps`.
 > - NEVER use `any` type. Use proper types or `unknown` with type guards.
-> - File naming: follow the project's existing conventions.
-> - Run tests locally before reporting success. If you wrote code, run the project's test command on the specific test file to confirm it works before messaging the lead.
+> - NEVER create functions that return JSX — create React components instead.
+> - NEVER pass useState setter functions as props — pass callbacks that wrap the setter.
+> - Components should have 3 or fewer state variables. If you need more, the component is doing too much — split it.
+> - Use lazy initialization for useState: `useState(() => computeValue())`.
+> - Ensure referential stability of useEffect dependencies.
+> - Use `useCallback` for callbacks passed to children, `useMemo` for expensive computations. NEVER return JSX from useMemo.
+> - File naming: kebab-case. Tests: co-located `*.test.tsx`. Relay fragments: `ComponentName_field`.
+> - Run tests locally before reporting success. If you wrote code, run `yarn test:unit:ci` on the specific test file to confirm it works before messaging the lead. (Applies to `implementer` and `test-writer`, not `build-runner`.)
 > - Include file paths and a summary of changes in every report back to the team lead. Don't just say "done" — list what files were changed and why.
-> - Keep test scope narrow. `test-writer`: each test file should cover one unit of behavior. Don't write integration tests unless the task explicitly calls for it. Focus on edge cases, error handling, and new behavior from the spec.
+> - Keep test scope narrow. `test-writer`: each test file should cover one unit of behavior. Don't write integration tests unless the task explicitly calls for it. Don't write useless tests that just confirm existing behavior without adding value. Focus on edge cases, error handling, and new behavior from the spec. Don't write tests that just confirm "it works" without specifying what "it" is. Don't write tests that are too broad to review effectively in one sitting. Don't write tests that require complex setup or fixtures unless necessary. Each test should be reviewable in under 5 minutes. Don't write 100-line test files that cover multiple scenarios. Break them into focused test files if needed.
+Don't write tests that are primitive or trivial.
 
 ### 5. Execute the TDD Loop
 
@@ -79,20 +91,25 @@ For each task in `tasks.md`:
 
 **c. Build-runner verifies**
 
-- Send `build-runner` to run the project's lint, typecheck, and test commands
+- Send `build-runner` to run `yarn lint`, `yarn tsc --noEmit`, `yarn tsc -b`, and `yarn test`
 - Wait for results
 - If anything fails, diagnose the issue and send the appropriate agent to fix it
+- It it passes, run `yarn build` to confirm it builds without errors
 
 **d. Review, fix, commit**
 
-- Read the changed files yourself and verify:
+- Read the changed files yourself and verify against this checklist:
   1. No `any` types introduced
-  2. No disabled lint rules
-  3. File naming follows project conventions
-  4. Tests are co-located appropriately
-  5. Follows existing patterns in the codebase
-  6. Uses best practices defined by the project
-- Run `build-runner` to do a final verification
+  2. No direct `@microsoft/teams-js` imports (must use host abstraction)
+  3. No schema type imports in UI components (must use Relay fragments)
+  4. No disabled ESLint rules
+  5. No functions returning JSX (should be React components)
+  6. No useState setters passed as props
+  7. Components have 3 or fewer state variables
+  8. useEffect dependencies are referentially stable
+  9. File naming follows kebab-case convention
+  10. Test files are co-located as `*.test.tsx`
+- Run `build-runner` to verify: `yarn lint`, `yarn tsc --noEmit`, `yarn tsc -b`, `yarn test:unit:ci`
 - If changes need fixes, send the appropriate agent back with specific feedback
 - Once satisfied, commit with a descriptive message
 - Check off the task in `tasks.md`
@@ -122,7 +139,7 @@ When all tasks are complete:
 ## Coding Standards
 
 - **Comment your code** — Explain what the code does and why. Not every line, but every non-obvious block, function, and module.
-- **Small commits** — Each commit should be a single logical change.
+- **Small commits** — Each commit should be a single logical change. "Add user model and migration" not "Add user system with auth, models, routes, and tests".
 - **Meaningful names** — Variables, functions, files should be self-documenting.
 - **Error handling** — Handle errors at system boundaries. Don't over-defend against impossible states.
 - **Tests** — Every feature gets tests. Unit tests for logic, integration tests for boundaries.
@@ -160,10 +177,9 @@ Mark tasks as you complete them. If you discover new tasks during implementation
 ## Fixing Review Comments (iterations 2+)
 
 When `comments.md` exists from a previous review:
-
 - Read ALL comments before starting fixes — understand the full scope first.
 - Fix ONLY what the reviewer flagged. Do not refactor surrounding code or introduce new patterns.
-- After EACH fix, run lint and typecheck to verify no new issues.
+- After EACH fix, run `yarn lint && yarn tsc --noEmit && yarn tsc -b` to verify no new issues.
 - Re-run the full review checklist (section 5d) before committing.
 - Instruct agents: "Fix ONLY this specific issue. Do not change anything else."
 

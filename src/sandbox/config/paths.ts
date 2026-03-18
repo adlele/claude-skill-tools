@@ -5,12 +5,13 @@ import * as path from "node:path";
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 
-import { die } from "../../shared/utils.js";
+import { die } from "../../shared/ui.js";
 import {
   PROMPTS_DIR,
   resolveRepoRoot,
   getSandboxStateDir,
   getSandboxBase as getSandboxBasePath,
+  getAllPromptFiles,
 } from "../../shared/paths.js";
 import type { SandboxState } from "./types.js";
 
@@ -39,27 +40,9 @@ export function getSandboxBase(): string {
   return getSandboxBasePath();
 }
 
-// Legacy exports — lazy getters that look like constants
-// These are functions, not constants, to avoid resolving at import time.
-// Callers should use the function forms above where possible.
-export const REPO_ROOT = new Proxy({} as { toString(): string; valueOf(): string }, {
-  get(_target, prop) {
-    if (prop === Symbol.toPrimitive || prop === "toString" || prop === "valueOf") {
-      return () => resolveRepoRoot();
-    }
-    // For string operations (path.join, etc.), resolve lazily
-    return (String.prototype as Record<string | symbol, unknown>)[prop];
-  },
-}) as unknown as string;
-
-export const SANDBOX_BASE = new Proxy({} as { toString(): string; valueOf(): string }, {
-  get(_target, prop) {
-    if (prop === Symbol.toPrimitive || prop === "toString" || prop === "valueOf") {
-      return () => getSandboxBasePath();
-    }
-    return (String.prototype as Record<string | symbol, unknown>)[prop];
-  },
-}) as unknown as string;
+// Re-export under legacy names for compatibility — callers must use these
+// in contexts that evaluate lazily (not at import time).
+export { resolveRepoRoot as REPO_ROOT_RESOLVE, getSandboxBasePath as SANDBOX_BASE_RESOLVE };
 
 // ============================================================
 // SLUG / STATE
@@ -79,9 +62,19 @@ export function stateFilePath(branch: string): string {
 export function readState(branch: string): SandboxState {
   const file = stateFilePath(branch);
   if (!fs.existsSync(file)) {
-    die(`No state file for branch '${branch}'. Is this a managed sandbox?`);
+    die(`No state file for branch '${branch}'.`, [
+      "Run 'sandbox list' to see managed sandboxes.",
+      "The sandbox may have been cleaned up already.",
+    ]);
   }
-  return JSON.parse(fs.readFileSync(file, "utf-8"));
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf-8"));
+  } catch {
+    die(`Corrupted state file: ${file}`, [
+      `Delete it manually: rm ${file}`,
+      "Then run 'sandbox clean' to remove the worktree.",
+    ]);
+  }
 }
 
 export function writeState(state: SandboxState): void {
@@ -129,11 +122,7 @@ export function isProcessRunning(pid: number): boolean {
 }
 
 export function getPromptFiles(): string[] {
-  if (!fs.existsSync(PROMPTS_DIR)) return [];
-  return fs
-    .readdirSync(PROMPTS_DIR)
-    .filter(f => f.endsWith(".md"))
-    .map(f => path.join(PROMPTS_DIR, f));
+  return getAllPromptFiles();
 }
 
 export function getStateFiles(): string[] {
@@ -154,20 +143,44 @@ export function resolveBranchFromId(id: string): string {
   const matches: SandboxState[] = [];
 
   for (const f of stateFiles) {
-    const state: SandboxState = JSON.parse(fs.readFileSync(f, "utf-8"));
-    if (state.slug === id || state.slug.startsWith(id)) {
+    let state: SandboxState;
+    try { state = JSON.parse(fs.readFileSync(f, "utf-8")); } catch { continue; }
+    if (state.slug === id || state.slug.startsWith(id) || state.slug.endsWith(id)) {
       matches.push(state);
     }
   }
 
   if (matches.length === 0) {
-    die(`No sandbox found matching id '${id}'`);
+    die(`No sandbox found matching id '${id}'.`, [
+      "Run 'sandbox list' to see available sandboxes.",
+    ]);
   }
   if (matches.length > 1) {
     const slugs = matches.map(m => m.slug).join(", ");
-    die(`Ambiguous id '${id}' — matches: ${slugs}`);
+    die(`Ambiguous id '${id}' — matches: ${slugs}`, [
+      "Provide a longer prefix or suffix to disambiguate.",
+    ]);
   }
   return matches[0].branch;
+}
+
+/**
+ * Find worktree directories in the sandbox base that have no matching state file.
+ */
+export function findOrphanedWorktrees(): string[] {
+  const base = getSandboxBase();
+  if (!fs.existsSync(base)) return [];
+  const stateSlugs = new Set(
+    getStateFiles().map(f => path.basename(f, ".json")),
+  );
+  return fs
+    .readdirSync(base)
+    .filter(d => {
+      const full = path.join(base, d);
+      try { return fs.statSync(full).isDirectory(); } catch { return false; }
+    })
+    .filter(d => !stateSlugs.has(d))
+    .map(d => path.join(base, d));
 }
 
 export function tailFile(filePath: string, lines: number): string {

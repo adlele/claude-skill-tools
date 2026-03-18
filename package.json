@@ -8,7 +8,8 @@
   },
   "bin": {
     "composer": "./dist/bin/composer.js",
-    "sandbox": "./dist/bin/sandbox.js"
+    "sandbox": "./dist/bin/sandbox.js",
+    "session-analyzer": "./dist/bin/session-analyzer.js"
   },
   "files": [
     "dist/",
@@ -17,6 +18,15 @@
   ],
   "scripts": {
     "build": "tsc && node scripts/copy-assets.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
     "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.0",
+    "@vitest/coverage-v8": "^4.0.18",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
   }
 }

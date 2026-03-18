@@ -1,0 +1,96 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Build & Development
+
+```bash
+npm install
+npm run build          # tsc + copy-assets (prompts/, hooks/ -> dist/)
+npm test               # vitest run (single run)
+npm run test:watch     # vitest in watch mode
+npm run test:coverage  # vitest with v8 coverage report
+```
+
+No linter is configured. TypeScript strict mode is on.
+
+## Testing
+
+Tests use **Vitest** and live in `tests/`. Two tiers:
+
+- **`tests/tier1/`** — Pure function tests (no I/O, no mocking). Highest ROI.
+- **`tests/tier2/`** — Filesystem tests using temp dirs. Each test creates a temp dir with `.git/`, `chdir`s into it, and calls `_resetRepoRootCache()` in `beforeEach`. Restores cwd in `afterAll`.
+- **`tests/helpers/fixtures.ts`** — Shared utilities (`createTempDir`, `removeTempDir`, `writeJson`, `writeFile`).
+
+Run a specific file or directory:
+```bash
+npx vitest run tests/tier1/slugify.test.ts   # single file
+npx vitest run tests/tier1                   # all tier 1
+npx vitest run -t "slugifyContext"           # by test name
+```
+
+Import paths in tests use `.js` extensions (same as source) — Vitest resolves them to `.ts`. For `process.exit` interception: `vi.spyOn(process, "exit").mockImplementation(...)`. Suppress console noise with `vi.spyOn(console, "log").mockImplementation(() => {})`.
+
+The project is an ESM package (`"type": "module"`) targeting Node.js >= 18. All internal imports use `.js` extensions (NodeNext module resolution).
+
+## Architecture
+
+Two CLI tools (`composer` and `sandbox`) that orchestrate multi-role AI agent workflows using Claude Code CLI and isolated git worktrees.
+
+### Entry Points
+
+- `src/bin/composer.ts` / `src/bin/sandbox.ts` - Thin shims that re-export the main modules
+- `src/composer/composer.ts` - Composer CLI: arg parsing, command dispatch, signal handlers
+- `src/sandbox/sandbox.ts` - Sandbox CLI: worktree management, ralph loop, role sessions
+
+### Composer (Orchestration Engine)
+
+The composer runs multi-step **compositions** (defined in `src/composer/config/compositions.ts`). Each composition is a sequence of `Step` objects with a type (`sandbox-create`, `claude-interactive`, `ralph`, `pr-dry-run`, `ado-pr-create`) and a shell command template.
+
+Key flow:
+1. `commands.ts:cmdCompose()` parses args, creates `SessionState`, calls `runComposition()`
+2. `execution.ts:runComposition()` loops through steps with an interactive prompt (n=next, s=skip, p=prev, q=quit)
+3. Step commands use `{placeholder}` template vars resolved at runtime via `resolveTemplate()`
+4. After sandbox-create steps, branch/worktree info is captured from sandbox state files
+5. Session state is persisted as JSON in `.claude/.skill-state/composer/`
+
+Tmux integration (`tmux.ts`): When running inside tmux, steps execute in split panes with a poll loop watching for completion.
+
+### Sandbox (Worktree Management)
+
+Creates isolated git worktree sandboxes for each AI session. The **ralph loop** (`sandbox ralph`) automates developer/reviewer iteration:
+- Runs developer agent (headless via `claude -p`) -> commits changes
+- Runs reviewer agent -> writes `comments.md`
+- User can ignore comments or re-iterate
+- Tracks iterations in `ralph-log.md`
+
+The sandbox guard hook (`hooks/sandbox-guard.sh`) is a PreToolUse hook that restricts file operations to the sandbox directory via `SANDBOX_DIR` env var. There's also a TypeScript equivalent (`sandbox-guard.ts`) for Windows.
+
+### Connectors
+
+- `src/connectors/ado-pull-request/create.ts` - Pushes branch, builds PR description from sandbox artifacts (feature-request.md, spec.md, tasks.md, ralph-log.md, comments.md), creates Azure DevOps PR via `az repos pr create`
+- `src/connectors/ado-work-item/fetch.ts` - Fetches ADO work items as markdown context via `az boards work-item show`
+
+### Metrics
+
+- `src/metrics/session-map.ts` - Maps composer sessions to Claude CLI session IDs (stored in `~/claude-skill-tools/session-maps/`)
+- `src/metrics/analyze-sessions.ts` - Parses Claude `.jsonl` session logs for token usage, cost, tool call breakdowns; generates HTML/text/JSON reports
+- `src/metrics/uuid.ts` - Deterministic session ID generation
+
+### Shared Layer
+
+- `src/shared/paths.ts` - `PACKAGE_ROOT`, `resolveRepoRoot()`, state directory helpers. All state dirs are under `<repo>/.claude/.skill-state/`
+- `src/shared/ui.ts` - ANSI formatting (colors, banners, error blocks, `die()`). Respects `NO_COLOR`.
+- `src/shared/config.ts` - Config with repo-level override at `<repo>/.claude/.skill-state/config.json`, falling back to user-level `~/claude-skill-tools/config.json` (ADO org, field mappings)
+- `src/shared/utils.ts` - `promptUser()`, `nowISO()`, `copyDirIfExists()`
+
+## Key Conventions
+
+- CLI arg parsing is manual (no libraries) - switch/case blocks in `main()` or command functions
+- State is JSON files on disk (no database). Composer state: `<repo>/.claude/.skill-state/composer/<sessionId>.json`. Sandbox state: `<repo>/.claude/.skill-state/sandbox/<slug>.json`
+- User-level durable data (session maps, config) lives in `~/claude-skill-tools/`
+- Repo-level config override: `<repo>/.claude/.skill-state/config.json` (merged over user-level, per-field)
+- Role prompts are markdown files in `prompts/` (analyst, architect, developer, developer_single, reviewer, tester)
+- External deps: only `@types/node` and `typescript` (zero runtime deps)
+- All shell commands spawned via `spawnSync`/`spawn` from `node:child_process`
+- The `die()` function (in `shared/ui.ts`) prints an error with optional suggestions and calls `process.exit(1)`

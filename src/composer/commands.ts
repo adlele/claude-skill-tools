@@ -6,10 +6,9 @@ import type { SessionState } from "./config/types.js";
 import {
   COMPOSITIONS,
   getRepoRoot,
-  getSandboxScript,
   getSandboxStateDirPath,
 } from "./config/compositions.js";
-import { getComposerStateDir, PROMPTS_DIR } from "../shared/paths.js";
+import { getComposerStateDir, getAllPromptFiles, resolvePromptFile, PACKAGE_ROOT } from "../shared/paths.js";
 import {
   die,
   nowISO,
@@ -21,9 +20,23 @@ import {
 } from "./state.js";
 import { runComposition } from "./execution.js";
 import { HAS_TMUX, IN_TMUX } from "./tmux.js";
-import { fetchAdoItem } from "../ado-bug-context/fetch-ado-item.js";
+import { fetchAdoItem } from "../connectors/ado-work-item/fetch.js";
+import { resolveAdoOrg } from "../shared/config.js";
 import { promptUser } from "../shared/utils.js";
+import {
+  generateImprovedFeatureRequest,
+  generateImplementationFeatureRequest,
+  generateFeatureRequestChangesSummary,
+  printDistillBanner,
+} from "../sandbox/distill.js";
 import * as ui from "./ui.js";
+import {
+  createSessionMap,
+  loadSessionMap,
+  listAllSessionMaps,
+  claudeProjectDirPaths,
+} from "../metrics/session-map.js";
+import type { ComposerSessionMap } from "../metrics/types.js";
 
 function getGitUser(): string {
   const repoRoot = getRepoRoot();
@@ -36,19 +49,15 @@ function getGitUser(): string {
 }
 
 function getAvailableRoles(): string[] {
-  if (!fs.existsSync(PROMPTS_DIR)) return [];
-  return fs
-    .readdirSync(PROMPTS_DIR)
-    .filter(f => f.endsWith(".md"))
-    .map(f => f.replace(/\.md$/, ""));
+  return getAllPromptFiles().map(f => path.basename(f, ".md"));
 }
 
-function getAvailableCompositions(): string[] {
+export function getAvailableCompositions(): string[] {
   return Object.keys(COMPOSITIONS);
 }
 
 /** Turn free-text context into a short kebab-case slug for branch names. */
-function slugifyContext(text: string): string {
+export function slugifyContext(text: string): string {
   return text
     .replace(/^#\s*/, "") // strip leading markdown heading
     .toLowerCase()
@@ -84,33 +93,28 @@ function resolveUniqueSessionName(name: string): string {
 }
 
 export function cmdList(): void {
-  console.log(ui.bold("Available compositions:"));
-  console.log("");
-  for (const [name, comp] of Object.entries(COMPOSITIONS)) {
+  const compLines = Object.entries(COMPOSITIONS).map(([name, comp]) => {
     const padded = name.padEnd(15);
-    console.log(
-      `  ${ui.cyan(padded)} ${comp.description} ${ui.dim(`(${comp.steps.length} steps)`)}`,
-    );
-  }
-  console.log("");
-  console.log(ui.bold("Usage:"));
-  console.log(
+    return `  ${ui.cyan(padded)} ${comp.description} ${ui.dim(`(${comp.steps.length} steps)`)}`;
+  });
+  console.log([
+    ui.bold("Available compositions:"),
+    "",
+    ...compLines,
+    "",
+    ui.bold("Usage:"),
     '  composer compose <type> --context "..." | --context-file <path> | --ado <id>',
-  );
-  console.log("");
-  console.log(ui.bold("Options:"));
-  console.log("  --model <model>         Model to use (default: opus)");
-  console.log(
+    "",
+    ui.bold("Options:"),
+    "  --model <model>         Model to use (default: opus)",
     "  --max-iterations <n>    Max dev/review iterations (default: 5)",
-  );
-  console.log(
     "  --role <name>           Role to run (required for 'role' composition)",
-  );
-  console.log(
     "  --name <session-name>   Custom session name (auto-deduped if taken)",
-  );
-  console.log("");
-  console.log("Run 'composer --help' for full usage details.");
+    "  --base <branch>         Base branch for sandbox worktree (default: master)",
+    "  --skip-sandbox          Skip sandbox creation, run on current branch",
+    "",
+    "Run 'composer --help' for full usage details.",
+  ].join("\n"));
 }
 
 export async function cmdCompose(args: string[]): Promise<void> {
@@ -137,6 +141,8 @@ export async function cmdCompose(args: string[]): Promise<void> {
   let maxIterations = 5;
   let role = "";
   let sessionName = "";
+  let skipSandbox = false;
+  let baseBranch = "master";
 
   let i = 1;
   while (i < args.length) {
@@ -162,12 +168,26 @@ export async function cmdCompose(args: string[]): Promise<void> {
       case "--name":
         sessionName = args[++i] ?? "";
         break;
+      case "--base":
+        baseBranch = args[++i] ?? "master";
+        break;
+      case "--skip-sandbox":
+        skipSandbox = true;
+        break;
       default:
         die(`Unknown option '${args[i]}'.`, [
           "Run 'composer compose --help' or 'composer --help' for usage.",
         ]);
     }
     i++;
+  }
+
+  // Validate --skip-sandbox compatibility
+  if (skipSandbox && compType === "headless") {
+    die("--skip-sandbox is not compatible with the 'headless' composition.", [
+      "Headless mode requires a sandbox worktree to manage the background process.",
+      "Run without --skip-sandbox, or use a different composition type.",
+    ]);
   }
 
   // Validate --role usage
@@ -178,8 +198,7 @@ export async function cmdCompose(args: string[]): Promise<void> {
         'Example: composer compose role --role architect --context "..."',
       ]);
     }
-    const promptFile = path.join(PROMPTS_DIR, `${role}.md`);
-    if (!fs.existsSync(promptFile)) {
+    if (!resolvePromptFile(`${role}.md`)) {
       die(`Unknown role '${role}'.`, [
         `Available roles: ${getAvailableRoles().join(", ")}`,
       ]);
@@ -200,8 +219,9 @@ export async function cmdCompose(args: string[]): Promise<void> {
 
   // Fetch from ADO if specified
   if (adoId) {
+    const adoOrg = await resolveAdoOrg();
     try {
-      context = fetchAdoItem(adoId);
+      context = fetchAdoItem(adoId, adoOrg);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       ui.errorBlock("Failed to fetch ADO work item", msg, [
@@ -219,12 +239,7 @@ export async function cmdCompose(args: string[]): Promise<void> {
       context = manual.trim();
     }
 
-    console.log("");
-    console.log("=== ADO Work Item Context ===");
-    console.log("");
-    console.log(context);
-    console.log("");
-    console.log("=============================");
+    console.log(`\n=== ADO Work Item Context ===\n\n${context}\n\n=============================`);
     const answer = await promptUser("Proceed with this context? (y/n) ");
     if (answer.toLowerCase() !== "y") {
       console.log("Aborted.");
@@ -269,12 +284,41 @@ export async function cmdCompose(args: string[]): Promise<void> {
     worktree: "",
     adoId,
     role: role || undefined,
+    baseBranch,
+    skipSandbox: skipSandbox || undefined,
     stepTimings: [],
     started: nowISO(),
     updated: nowISO(),
   };
 
+  // --skip-sandbox: skip sandbox creation step, run on current branch
+  if (skipSandbox) {
+    const repoRoot = getRepoRoot();
+    const currentBranch = spawnSync(
+      "git",
+      ["-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD"],
+      { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] },
+    ).stdout?.trim() || "";
+
+    if (!currentBranch) {
+      die("Could not determine current git branch for --skip-sandbox.");
+    }
+
+    state.currentStep = 1; // skip step 0 (sandbox-create)
+    state.branch = currentBranch;
+    state.worktree = repoRoot;
+
+    // Seed feature-request.md in current directory if context was provided
+    if (context) {
+      fs.writeFileSync(
+        path.join(repoRoot, "feature-request.md"),
+        context + "\n",
+      );
+    }
+  }
+
   writeState(state);
+  createSessionMap(sessionId, compType, state.branch);
 
   ui.banner(`Composer: ${compType}`, [
     ["Session", sessionId],
@@ -283,7 +327,6 @@ export async function cmdCompose(args: string[]): Promise<void> {
     ["Max iterations", String(maxIterations)],
     ["Execution", IN_TMUX && HAS_TMUX ? "tmux windows" : "inline (no tmux)"],
   ]);
-  console.log("");
 
   await runComposition(state);
 }
@@ -324,7 +367,6 @@ export async function cmdResume(args: string[]): Promise<void> {
     ["Branch", state.branch || ui.dim("<pending>")],
     ["Worktree", state.worktree || ui.dim("<pending>")],
   ]);
-  console.log("");
 
   await runComposition(state);
 }
@@ -454,9 +496,331 @@ export async function cmdClean(args: string[]): Promise<void> {
     }
   }
 
+  const repoRoot = getRepoRoot();
+  const sandboxBin = path.join(PACKAGE_ROOT, "dist", "bin", "sandbox.js");
+
   for (const s of toRemove) {
+    // Clean the associated sandbox (worktree, branch, sandbox state) if a branch exists
+    if (s.branch) {
+      console.log(`  Cleaning sandbox for ${s.branch}...`);
+      const result = spawnSync(
+        "node",
+        [sandboxBin, "clean", "--branch", s.branch, "--force"],
+        { cwd: repoRoot, stdio: "inherit" },
+      );
+      if (result.status !== 0) {
+        ui.warn(`Sandbox cleanup failed for ${s.branch} (may already be gone).`);
+      }
+    }
     deleteSession(s.sessionId);
     console.log(`  Removed: ${s.sessionId} (${s.composition}, ${s.status})`);
   }
   console.log(`\nCleaned ${toRemove.length} session(s).`);
+}
+
+export async function cmdReport(args: string[]): Promise<void> {
+  let sessionId = "";
+  let format: "json" | "text" | "html" = "html";
+  let outPath: string | null = null;
+
+  let i = 0;
+  while (i < args.length) {
+    switch (args[i]) {
+      case "--json":
+        format = "json";
+        i++;
+        break;
+      case "--text":
+        format = "text";
+        i++;
+        break;
+      case "--html":
+        format = "html";
+        i++;
+        break;
+      case "--out":
+        outPath = args[++i] ?? "";
+        i++;
+        break;
+      default:
+        if (!sessionId && !args[i].startsWith("-")) {
+          sessionId = args[i];
+          i++;
+        } else {
+          die(`Unknown option '${args[i]}'.`, [
+            "Usage: composer report [session-id] [--json|--text|--html] [--out <path>]",
+          ]);
+        }
+    }
+  }
+
+  // If no session specified, list all and prompt
+  if (!sessionId) {
+    const allMaps = listAllSessionMaps();
+    if (allMaps.length === 0) {
+      die("No tracked composer sessions found.", [
+        "Session tracking is enabled for new compositions.",
+        "Run 'composer compose ...' to start a tracked session.",
+      ]);
+    }
+
+    // Sort most recent first
+    allMaps.sort((a, b) => {
+      const ta = new Date(a.startedAt).getTime() || 0;
+      const tb = new Date(b.startedAt).getTime() || 0;
+      return tb - ta;
+    });
+
+    console.log(ui.bold("Tracked composer sessions:\n"));
+    for (let idx = 0; idx < allMaps.length; idx++) {
+      const m = allMaps[idx];
+      const sessions = m.claudeSessions.length;
+      const date = m.startedAt ? ui.relativeTime(m.startedAt) : "—";
+      console.log(
+        `  ${ui.cyan(String(idx + 1).padStart(2))}  ${m.composerSessionId.slice(0, 30).padEnd(32)} ${m.compositionType.padEnd(12)} ${String(sessions).padEnd(4)} sessions  ${date}`,
+      );
+    }
+    console.log("");
+
+    const answer = await promptUser(`  Select session [1-${allMaps.length}]: `);
+    const selected = parseInt(answer.trim(), 10);
+    if (isNaN(selected) || selected < 1 || selected > allMaps.length) {
+      console.log("  Aborted.");
+      return;
+    }
+    sessionId = allMaps[selected - 1].composerSessionId;
+  }
+
+  // Resolve partial session ID
+  const allMaps = listAllSessionMaps();
+  const match = allMaps.find(
+    m =>
+      m.composerSessionId === sessionId ||
+      m.composerSessionId.endsWith(sessionId) ||
+      m.composerSessionId.startsWith(sessionId),
+  );
+
+  if (!match) {
+    die(`No session map found for '${sessionId}'.`, [
+      "The session may predate metrics tracking.",
+      "Run 'composer report' without args to see all tracked sessions.",
+    ]);
+  }
+
+  const map: ComposerSessionMap = match;
+
+  if (map.claudeSessions.length === 0) {
+    die("No Claude sessions recorded for this composer session.", [
+      "The composition may not have reached any Claude steps yet.",
+    ]);
+  }
+
+  // Lazy import to avoid loading the large analyzer module unless needed
+  const { parseSession, printSessionMetrics, generateHtmlReport } =
+    await import("../metrics/analyze-sessions.js");
+
+  // Collect and parse all session files
+  type ParsedEntry = { label: string; metrics: ReturnType<typeof parseSession> };
+  const parsed: ParsedEntry[] = [];
+
+  for (const entry of map.claudeSessions) {
+    const dirs = claudeProjectDirPaths(entry.projectDir);
+    let found = false;
+    for (const dir of dirs) {
+      const filePath = path.join(dir, `${entry.claudeSessionId}.jsonl`);
+      if (fs.existsSync(filePath)) {
+        const metrics = parseSession(filePath);
+        // Enrich with composer context
+        metrics.sessionId = entry.claudeSessionId;
+        metrics.summary = entry.stepLabel;
+        if (entry.ralphIteration) {
+          metrics.summary += ` (iter ${entry.ralphIteration}, ${entry.ralphPhase})`;
+        }
+        parsed.push({ label: entry.stepLabel, metrics });
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      ui.warn(
+        `Session file not found for ${entry.claudeSessionId.slice(0, 8)}... (${entry.stepLabel})`,
+      );
+    }
+  }
+
+  if (parsed.length === 0) {
+    die("No session files could be found on disk.", [
+      "The worktree may have been deleted.",
+      "Check that ~/.claude/projects/ contains the session .jsonl files.",
+    ]);
+  }
+
+  const allMetrics = parsed.map(p => p.metrics);
+
+  // Output
+  if (format === "json") {
+    console.log(
+      JSON.stringify(
+        { composerSession: map, metrics: allMetrics },
+        null,
+        2,
+      ),
+    );
+  } else if (format === "text") {
+    ui.banner(`Report: ${map.compositionType}`, [
+      ["Session", map.composerSessionId],
+      ["Branch", map.branch],
+      ["Claude sessions", String(parsed.length)],
+    ]);
+    for (const p of parsed) {
+      printSessionMetrics(p.metrics);
+    }
+  } else {
+    const html = generateHtmlReport(allMetrics);
+    const os = await import("node:os");
+    const { execSync } = await import("node:child_process");
+    const out =
+      outPath ??
+      path.join(
+        os.tmpdir(),
+        `composer-report-${map.composerSessionId.slice(0, 12)}.html`,
+      );
+    fs.writeFileSync(out, html);
+    console.log(`\n  Report written to ${out}`);
+    try {
+      execSync(`open "${out}"`);
+    } catch {
+      // non-macOS or open not available
+    }
+  }
+}
+
+export async function cmdDistill(args: string[]): Promise<void> {
+  let sessionId = "";
+  let model = "sonnet";
+  let fromImpl = false;
+  let baseBranch = "";
+
+  let i = 0;
+  while (i < args.length) {
+    switch (args[i]) {
+      case "--model":
+        model = args[++i] ?? "sonnet";
+        break;
+      case "--from-impl":
+        fromImpl = true;
+        break;
+      case "--base":
+        baseBranch = args[++i] ?? "master";
+        break;
+      default:
+        if (!sessionId && !args[i].startsWith("-")) {
+          sessionId = args[i];
+        } else {
+          die(`Unknown option '${args[i]}'.`, [
+            "Usage: composer distill [session-id] [--model <model>] [--from-impl] [--base <branch>]",
+          ]);
+        }
+    }
+    i++;
+  }
+
+  // If no session specified, pick the most recent one with a worktree
+  if (!sessionId) {
+    const sessions = listStateSessions()
+      .filter(s => s.worktree)
+      .sort((a, b) => {
+        const ta = new Date(a.updated || a.started || "").getTime() || 0;
+        const tb = new Date(b.updated || b.started || "").getTime() || 0;
+        return tb - ta;
+      });
+
+    if (sessions.length === 0) {
+      die("No sessions with a worktree found.", [
+        "Run 'composer sessions' to see available sessions.",
+        "Provide a session ID: composer distill <session-id>",
+      ]);
+    }
+    sessionId = sessions[0].sessionId;
+    console.log(`  Using most recent session: ${ui.cyan(sessionId)}`);
+  }
+
+  const state = readState(sessionId);
+
+  if (!state.worktree) {
+    die(`Session '${sessionId}' has no worktree.`, [
+      "The sandbox creation step may not have completed.",
+      "Run 'composer sessions' to check session state.",
+    ]);
+  }
+
+  if (!fs.existsSync(state.worktree)) {
+    die(`Worktree not found: ${state.worktree}`, [
+      "The worktree may have been deleted.",
+      "Run 'composer clean' to remove stale sessions.",
+    ]);
+  }
+
+  if (fromImpl) {
+    console.log(
+      `\n  ${ui.yellow("⚗")}  ${ui.yellow("Distilling feature request from implementation...")}` +
+      `\n  ${ui.dim("   Reading code diff + planning artifacts in " + state.worktree)}`,
+    );
+
+    const content = await generateImplementationFeatureRequest(
+      state.worktree,
+      model,
+      baseBranch || state.baseBranch || "master",
+    );
+
+    if (!content) {
+      console.log(
+        "  Nothing to distill — no code changes found on this branch.",
+      );
+      return;
+    }
+
+    console.log(`  ${ui.green("✓")} Implementation feature request generated`);
+    console.log("");
+    console.log("=== Implementation Feature Request ===");
+    console.log(
+      `Saved to: ${path.join(state.worktree, "implementation-feature-request.md")}`,
+    );
+    console.log("");
+    console.log("To reuse in a fresh sandbox:");
+    console.log(
+      `  sandbox start --ralph --context-file ${path.join(state.worktree, "implementation-feature-request.md")}`,
+    );
+    console.log("");
+    console.log("--- Content ---");
+    console.log(content);
+    console.log("---");
+  } else {
+    console.log(
+      `\n  ${ui.yellow("⚗")}  ${ui.yellow("Distilling improved feature request...")}` +
+      `\n  ${ui.dim("   Sending feature-request.md + requirements.md + spec.md to Claude")}`,
+    );
+
+    const content = await generateImprovedFeatureRequest(state.worktree, model);
+
+    if (!content) {
+      console.log(
+        "  Nothing to distill — requires requirements.md and spec.md in the worktree.",
+      );
+      return;
+    }
+
+    console.log(`  ${ui.green("✓")} Distillation complete`);
+
+    console.log(`  ${ui.dim("   Generating changes summary...")}`);
+    const changesSummary = await generateFeatureRequestChangesSummary(
+      state.worktree,
+      model,
+    );
+    if (changesSummary) {
+      console.log(`  ${ui.green("✓")} Changes summary generated`);
+    }
+
+    printDistillBanner(content, state.worktree, changesSummary);
+  }
 }

@@ -14,7 +14,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { spawnSync } from "node:child_process";
 
-import { die } from "../shared/utils.js";
+import { die } from "../../shared/ui.js";
 
 // ============================================================
 // ARG PARSING

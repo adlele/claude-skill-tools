@@ -1,6 +1,8 @@
 // ralph-helpers.ts — Utilities for the ralph developer/reviewer iteration loop
 
 import * as fs from "node:fs";
+import * as path from "node:path";
+import * as crypto from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 
 export function expandRanges(input: string): number[] {
@@ -233,12 +235,15 @@ export async function runAgentWithTimer(
   claudeArgs: string[],
   worktree: string,
   logFile: string,
-): Promise<"done" | "stopped"> {
-  const env = { ...process.env, SANDBOX_DIR: worktree };
+): Promise<{ result: "done" | "stopped"; sessionId: string }> {
+  const env: Record<string, string | undefined> = { ...process.env, SANDBOX_DIR: worktree };
   delete env.CLAUDECODE;
 
+  const sessionId = crypto.randomUUID();
+  const argsWithSession = ["--session-id", sessionId, ...claudeArgs];
+
   const logFd = fs.openSync(logFile, "w");
-  const child = spawn("claude", claudeArgs, {
+  const child = spawn("claude", argsWithSession, {
     cwd: worktree,
     env,
     stdio: ["ignore", logFd, logFd],
@@ -327,7 +332,49 @@ export async function runAgentWithTimer(
       }
 
       fs.closeSync(logFd);
-      resolve(stopped ? "stopped" : "done");
+      resolve({ result: stopped ? "stopped" : "done", sessionId });
     });
   });
+}
+
+/**
+ * Run Claude interactively (no -p flag) with full terminal access.
+ * Agents work because the session stays alive for coordination.
+ * After the session exits, copies the Claude session transcript to the log file.
+ */
+export async function runInteractiveAgentWithLog(
+  label: string,
+  claudeArgs: string[],
+  worktree: string,
+  logFile: string,
+): Promise<{ result: "done" | "stopped"; sessionId: string }> {
+  const env: Record<string, string | undefined> = { ...process.env, SANDBOX_DIR: worktree };
+  delete env.CLAUDECODE;
+
+  // Generate a session ID so we can find the transcript after exit
+  const sessionId = crypto.randomUUID();
+  const args = ["--session-id", sessionId, ...claudeArgs];
+
+  const child = spawnSync("claude", args, {
+    cwd: worktree,
+    env,
+    stdio: "inherit",
+  });
+
+  // Copy the session transcript to the log file if we can find it
+  const projectSlug = worktree.replace(/\//g, "-").replace(/^-/, "");
+  const possiblePaths = [
+    path.join(process.env.HOME ?? "", ".claude", "projects", projectSlug, `${sessionId}.jsonl`),
+    path.join(process.env.HOME ?? "", ".claude", "projects", `-${projectSlug}`, `${sessionId}.jsonl`),
+  ];
+  for (const p of possiblePaths) {
+    if (fs.existsSync(p)) {
+      fs.copyFileSync(p, logFile);
+      console.log(`  [${label}] Session transcript saved to ${logFile}`);
+      break;
+    }
+  }
+
+  console.log(`  [${label}] Session ended (exit code ${child.status ?? 0}).`);
+  return { result: child.status === 0 ? "done" : "stopped", sessionId };
 }
