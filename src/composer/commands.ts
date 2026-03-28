@@ -102,6 +102,8 @@ export function cmdList(): void {
     const padded = name.padEnd(15);
     return `  ${ui.cyan(padded)} ${comp.description} ${ui.dim(`(${comp.steps.length} steps)`)}`;
   });
+  // NOTE: formatCompositionList() is a plain-text variant used in die() error messages.
+  // This function uses ui.cyan/ui.dim for richer formatting in normal output.
   console.log(
     [
       ui.bold("Available compositions:"),
@@ -124,10 +126,18 @@ export function cmdList(): void {
   );
 }
 
+function formatCompositionList(): string[] {
+  return Object.entries(COMPOSITIONS).map(([name, comp]) => {
+    const padded = name.padEnd(15);
+    return `  ${padded} ${comp.description}`;
+  });
+}
+
 export async function cmdCompose(args: string[]): Promise<void> {
   if (args.length === 0) {
     die("Missing composition type.", [
-      "Run 'composer list' to see available types.",
+      ...formatCompositionList(),
+      "",
       "Example: composer compose full --ado 12345",
       'Example: composer compose role --role architect --context "..."',
     ]);
@@ -136,8 +146,7 @@ export async function cmdCompose(args: string[]): Promise<void> {
   const compType = args[0];
   if (!COMPOSITIONS[compType]) {
     die(`Unknown composition type '${compType}'.`, [
-      `Available types: ${getAvailableCompositions().join(", ")}`,
-      "Run 'composer list' for descriptions.",
+      ...formatCompositionList(),
     ]);
   }
 
@@ -214,6 +223,16 @@ export async function cmdCompose(args: string[]): Promise<void> {
     die(`--role is only valid with the 'role' composition type.`, [
       `Use 'composer compose role --role ${role} ...' instead.`,
     ]);
+  }
+
+  // Warn if not running inside tmux (steps benefit from tmux pane execution)
+  if (HAS_TMUX && !IN_TMUX) {
+    ui.warn("Not running inside tmux. Steps will execute inline instead of in split panes.");
+    const answer = await promptUser("  Continue without tmux? (y/n) ");
+    if (answer.toLowerCase() !== "y") {
+      console.log("\n  To start in tmux, run:  tmux new -s composer");
+      process.exit(0);
+    }
   }
 
   if (!context && !contextFile && !adoId) {
@@ -527,6 +546,52 @@ export async function cmdClean(args: string[]): Promise<void> {
     console.log(`  Removed: ${s.sessionId} (${s.composition}, ${s.status})`);
   }
   console.log(`\nCleaned ${toRemove.length} session(s).`);
+}
+
+export function cmdSize(args: string[]): void {
+  let sessionId = "";
+  for (const a of args) {
+    if (!a.startsWith("--")) {
+      sessionId = a;
+    } else {
+      die(`Unknown option for size: ${a}`, ["Run 'composer --help' for usage."]);
+    }
+  }
+
+  let session: SessionState;
+  if (sessionId) {
+    session = readState(resolveSessionId(sessionId));
+  } else {
+    const sessions = listStateSessions()
+      .filter(s => s.status === "in_progress")
+      .sort((a, b) => {
+        const ta = new Date(a.updated || a.started || "").getTime() || 0;
+        const tb = new Date(b.updated || b.started || "").getTime() || 0;
+        return tb - ta;
+      });
+    if (sessions.length === 0) {
+      die("No in-progress sessions found.", [
+        "Provide a session ID: composer size <session-id>",
+        "Run 'composer sessions' to see all sessions.",
+      ]);
+    }
+    session = sessions[0];
+  }
+
+  if (!session.branch) {
+    die(`Session '${session.sessionId}' has no associated sandbox.`, [
+      "The sandbox may not have been created yet.",
+      "Try: composer size <session-id> after sandbox creation.",
+    ]);
+  }
+
+  const repoRoot = getRepoRoot();
+  const sandboxBin = path.join(PACKAGE_ROOT, "dist", "bin", "sandbox.js");
+  spawnSync(
+    "node",
+    [sandboxBin, "size", "--branch", session.branch],
+    { cwd: repoRoot, stdio: "inherit" },
+  );
 }
 
 export async function cmdReport(args: string[]): Promise<void> {
