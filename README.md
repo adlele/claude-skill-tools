@@ -108,6 +108,7 @@ The composer orchestrates multi-step workflows called **compositions**. Each com
 | `composer sessions` | Show all sessions with status, step, and branch |
 | `composer clean <target>` | Remove session state (`<id>`, `--all`, `--completed`, `--stale`) |
 | `composer report [session-id]` | Generate metrics report for a session |
+| `composer distill [session-id]` | Distill improved feature request from session artifacts |
 
 ### Composition Types
 
@@ -143,6 +144,15 @@ The composer orchestrates multi-step workflows called **compositions**. Each com
 --out <path>             Write report to a specific file path
 ```
 
+### Distill Options
+
+```
+[session-id]             Session to distill (defaults to most recent with a worktree)
+--model <model>          Model to use (default: sonnet)
+--from-impl              Generate from actual code diff instead of planning artifacts
+--base <branch>          Base branch for --from-impl diff (default: session's base or master)
+```
+
 ### Step Navigation
 
 During composition execution, each step pauses with an interactive prompt:
@@ -155,11 +165,11 @@ During composition execution, each step pauses with an interactive prompt:
 
 After the first manual prompt, subsequent steps use a 10-second countdown with auto-run. Steps marked `autoAdvance` (like sandbox creation) run immediately without prompting.
 
-When running inside tmux, steps execute in split panes with automatic completion detection. For ralph steps, the main pane spinner shows the current phase and iteration (e.g. `dev 2/5`, `rev 2/5`) by detecting `ralph-dev-N.log` / `ralph-rev-N.log` files in the worktree. This progress indicator only works in headless mode (`ralph-only`, `headless` compositions) because headless mode creates log files at the start of each phase; interactive mode (`full`, `manual`) writes the log file only after the session exits.
+When running inside tmux, steps execute in split panes with automatic completion detection. For ralph steps, the main pane spinner shows the current phase and iteration (e.g. `dev 2/5`, `rev 2/5`) by detecting `ralph-dev-N.log` / `ralph-rev-N.log` files in the worktree. Press `a` to toggle auto-advance (lets ralph continue without manual prompts between iterations).
 
 ## Sandbox
 
-The sandbox creates isolated git worktree environments for AI sessions. Each sandbox gets its own branch, working directory, and a copy of all role prompts.
+The sandbox creates isolated git worktree environments for AI sessions. Each sandbox gets its own branch, working directory, and a copy of all role prompts. Worktrees are created in a sibling directory to the repo (e.g. `../myrepo-sandboxes/<slug>/`).
 
 ### Commands
 
