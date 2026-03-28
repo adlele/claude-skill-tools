@@ -1,0 +1,106 @@
+---
+title: Distill & Re-run
+---
+
+# Distill & Re-run
+
+The distill command takes the artifacts from a completed composition and synthesizes them into an improved, zero-ambiguity feature request. Re-running with this distilled input produces dramatically cleaner results.
+
+## The problem
+
+First-pass results are often imperfect because the initial feature request was ambiguous. The developer guesses at edge cases, the reviewer flags gaps, and multiple ralph iterations are spent clarifying intent rather than improving code.
+
+## The solution: the distill-then-rerun flywheel
+
+```
+Initial feature request
+    --> full composition (analyst + architect + ralph)
+        --> distill (merge all artifacts into improved-feature-request.md)
+            --> ralph-only re-run (clean, fast, fewer iterations)
+```
+
+The first pass is an investment in understanding. The second pass turns that understanding into clean code.
+
+## Steps
+
+### 1. Run a full composition
+
+```bash
+composer compose full --context "Add caching to the API"
+```
+
+Let the analyst interview you, the architect design the solution, and the ralph loop implement a first pass. Even if the result is imperfect, the artifacts (requirements.md, spec.md, code changes) capture valuable decisions.
+
+### 2. Distill
+
+```bash
+# Interactive picker -- choose from recent sessions
+composer distill
+
+# Or specify a session directly
+composer distill <session-id>
+```
+
+The distill command sends the feature request, requirements.md, and spec.md to Claude, which produces two files in the worktree:
+
+| File | Purpose |
+|:-----|:--------|
+| `improved-feature-request.md` | A rewritten feature request that incorporates every decision, edge case, and constraint surfaced during the first pass |
+| `feature-request-changes-summary.md` | A diff-style summary showing what was added, clarified, or scoped out compared to the original |
+
+### 3. Review the distilled output
+
+Open `improved-feature-request.md` and verify it captures your intent. Check `feature-request-changes-summary.md` to see what changed. If something is wrong or missing, edit the improved feature request directly before re-running.
+
+### 4. Re-run with the distilled feature request
+
+```bash
+composer compose ralph-only \
+  --context-file <worktree>/improved-feature-request.md
+```
+
+The second pass gets unambiguous input from the start. The developer does not need to guess, the reviewer has fewer issues to flag, and the loop converges faster.
+
+## Alternative: --from-impl mode
+
+After a composition finishes, you can also distill from the actual implementation rather than from the planning artifacts:
+
+```bash
+composer distill --from-impl
+```
+
+This reads the code diff instead of requirements.md and spec.md, and produces **implementation-feature-request.md** -- a feature request that describes what was actually built.
+
+Use this when:
+
+- **Documenting what was built** -- the implementation diverged from the spec, and you want the feature request to reflect reality
+- **Feeding into a clean re-implementation** -- you liked the approach but want a fresh sandbox to produce cleaner code
+- **Creating a reference** -- future developers need a clear description of the feature as implemented
+
+## When the second pass pays for itself
+
+The distill-then-rerun cycle costs roughly one extra ralph-only run. It pays for itself when:
+
+- The first pass took 3+ ralph iterations due to ambiguity
+- The reviewer kept flagging the same category of issues (missing edge cases, wrong assumptions)
+- You edited the code significantly after the ralph loop finished
+
+If the first pass was clean (1-2 iterations, reviewer happy), a re-run is unlikely to improve things.
+
+## Full example
+
+```bash
+# First pass: broad feature request, expect some ambiguity
+composer compose full --context "Add rate limiting to the API"
+
+# After completion, distill the learnings
+composer distill my-rate-limit-session
+
+# Review the improved feature request
+cat .worktrees/rate-limiting/improved-feature-request.md
+
+# Second pass: tight, unambiguous input
+composer compose ralph-only \
+  --context-file .worktrees/rate-limiting/improved-feature-request.md \
+  --max-iterations 3
+```

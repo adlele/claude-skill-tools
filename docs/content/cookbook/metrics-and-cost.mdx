@@ -1,0 +1,116 @@
+---
+title: Metrics & Cost Tracking
+---
+
+# Metrics & Cost Tracking
+
+Every composition generates detailed metrics: token usage, cost, tool calls, and timing. Use these to understand where tokens are spent and how to reduce costs.
+
+## Composer Reports
+
+Generate a report for any completed (or in-progress) session:
+
+```bash
+# Interactive session picker
+composer report
+
+# Direct report by session ID
+composer report my-session
+
+# Output formats
+composer report --text                      # Plain text to stdout
+composer report --json                      # Machine-readable JSON
+composer report --html --out report.html    # Save HTML report to a file
+```
+
+### What the report contains
+
+| Section | Details |
+|:--------|:--------|
+| Session metadata | Session ID, branch name, composition type, total duration |
+| Per-step breakdown | Token usage (input + output) and cost for each step (analyst, architect, developer, reviewer) |
+| Tool call distribution | How many times each tool was used (Read, Write, Edit, Bash, Grep) across the session |
+| Wall clock timing | How long each step took in real time |
+
+The HTML format includes charts and is the easiest to scan. The JSON format is useful for aggregating metrics across many sessions programmatically.
+
+## Session Explorer
+
+For deeper single-session analysis, use the session explorer:
+
+```bash
+# Launch a local browser server with all sessions
+session-explorer
+
+# Generate a single-session HTML report
+session-explorer <sessionId>
+```
+
+The browser server runs at `localhost:3456` by default and lets you browse sessions interactively.
+
+### Session Explorer features
+
+- **Metrics tab** -- token counts, cost, tool usage breakdown with visualizations
+- **Timeline tab** -- chronological view of every tool call and agent response
+- **Subagent tracking** -- if the developer spawned sub-agents, their individual metrics are tracked separately
+
+## Understanding costs
+
+### Model pricing is the biggest lever
+
+Opus costs significantly more per token than Sonnet. Choosing the right model for each task has the largest impact on your bill.
+
+| Scenario | Recommended model |
+|:---------|:------------------|
+| Complex architecture, nuanced trade-offs | opus |
+| Straightforward implementation, bug fixes | sonnet |
+| Tests, refactors, renames | sonnet |
+| Security review, performance audit | opus |
+
+### Ralph iterations are the biggest cost driver
+
+Each ralph iteration includes a full developer pass (reading context, writing code, committing) and a full reviewer pass (reading diff, writing comments). Two agents, both processing the full context.
+
+To reduce iteration costs:
+
+```bash
+# Cap iterations for simple tasks
+composer compose ralph-only --max-iterations 2 --context "..."
+
+# Use a cheaper model
+composer compose ralph-only --model sonnet --context "..."
+
+# Disable sub-agents for less complex work
+composer compose ralph-only --no-agents --context "..."
+```
+
+### Cost rule of thumb
+
+- **1 iteration** = 1 developer pass + 1 reviewer pass
+- **Full composition** (analyst + architect + 3 ralph iterations) costs roughly 5x a single ralph iteration
+- **Distill + re-run** adds roughly 1.5 iterations of cost (the distill call + a cleaner second pass)
+
+### Reducing costs in practice
+
+1. **Be specific in your context.** Vague feature requests cause more ralph iterations because the developer guesses wrong and the reviewer catches it.
+2. **Use ralph-only when you can.** Skip the analyst and architect steps if you already know what to build.
+3. **Set --max-iterations.** Default is 5 for composer. For well-defined tasks, 2-3 is often enough.
+4. **Use --model sonnet.** Reserve opus for tasks that genuinely need deeper reasoning.
+5. **Use --no-agents.** Sub-agent delegation is powerful but costs more. Disable it for simple tasks.
+6. **Distill and re-run instead of iterating.** If the first pass took 5+ iterations, distilling and re-running with 2-3 iterations is often cheaper than letting the loop keep going.
+
+## Session Maps
+
+The composer maps its session IDs to the underlying Claude CLI session IDs. These mappings are stored at:
+
+```
+~/claude-skill-tools/session-maps/
+```
+
+Session maps survive `composer clean`, so you can generate reports for sessions whose worktrees have already been deleted. This is useful for:
+
+- Tracking costs over time across many compositions
+- Generating reports for completed and cleaned-up work
+- Auditing token usage after the fact
+
+The maps are plain JSON files. Each entry links a composer session ID to one or more Claude CLI session IDs (one per step that invoked Claude).

@@ -1,0 +1,94 @@
+---
+title: Roles
+---
+
+# Roles
+
+A role is a markdown system prompt that defines an AI agent's behavior, boundaries, and output format. Roles are the mechanism by which each agent in a composition knows what it should do -- and, just as importantly, what it should not do.
+
+## What is a role?
+
+When a Claude session starts inside a sandbox, it receives a role prompt as its system instructions. This prompt tells the agent:
+
+- What artifacts to read as input
+- What artifact to produce as output
+- What constraints to follow
+- What format the output should take
+
+Role prompts live as markdown files in the `prompts/` directory of the package. They are copied into each sandbox at creation time.
+
+## Shipped roles
+
+Six roles ship with claude-skill-tools:
+
+| Role | Reads | Produces | Key constraints |
+|:-----|:------|:---------|:----------------|
+| **analyst** | feature-request.md | requirements.md | No technology choices. Challenge vague requirements. Ask clarifying questions. |
+| **architect** | requirements.md | spec.md | Discuss trade-offs and alternatives. No code -- design only. |
+| **developer** | spec.md, tasks.md | Committed code | TDD workflow. Spawns sub-agents. Small, focused commits. |
+| **developer_single** | spec.md, comments.md | Committed code | Solo mode -- no sub-agents. Used by ralph for iteration. |
+| **reviewer** | Code diff, spec.md | comments.md | Categorizes findings as Must Fix / Should Fix / Nitpicks. Cannot modify code. |
+| **tester** | spec.md | Test code | Playwright tests. Page Object Model. |
+
+## Role boundaries
+
+System prompts in claude-skill-tools are treated as **rules, not suggestions**. Each role has hard boundaries:
+
+- The **analyst** cannot write code or make technology choices
+- The **architect** produces design documents, never implementation
+- The **reviewer** reads code and writes comments -- it cannot modify files
+- The **developer** writes code but does not review its own work
+
+These boundaries exist to maintain separation of concerns. When a single agent both writes and reviews code, it tends to rubber-stamp its own work. Splitting the roles produces meaningfully better output.
+
+> [!NOTE]
+> Violating role boundaries does not raise an error -- Claude simply follows its system prompt. If you modify a role prompt to remove boundaries, the agent will comply, but review quality will degrade.
+
+## Developer: team lead vs solo
+
+Two developer roles serve different use cases:
+
+**developer.md (team lead)** spawns sub-agents to divide work:
+- An **implementer** sub-agent writes the code
+- A **test-writer** sub-agent writes tests
+- A **build-runner** sub-agent verifies the build passes
+
+This TDD-driven workflow produces higher quality code but costs more tokens and takes longer.
+
+**developer_single.md (solo)** works alone without sub-agents. It reads the spec, writes code, writes tests, and verifies the build in a single session. This is faster and cheaper.
+
+Ralph uses `developer_single` by default. When `--no-agents` is **not** set, ralph uses `developer.md` (the team lead variant) instead.
+
+## Prompt override system
+
+You can customize any role prompt on a per-repository basis without modifying the package.
+
+**Resolution order:**
+
+1. **Repo-local**: `.claude/prompts/<role>.md` in your repository
+2. **Package default**: `prompts/<role>.md` in the claude-skill-tools package
+
+If a repo-local file exists, it completely replaces the package default for that role. Override only the roles you need to customize -- unoverridden roles continue using the package defaults.
+
+Example: to customize the reviewer for your project:
+
+```bash
+mkdir -p .claude/prompts
+cp node_modules/claude-skill-tools/prompts/reviewer.md .claude/prompts/reviewer.md
+# Edit .claude/prompts/reviewer.md to add project-specific review criteria
+```
+
+> [!WARNING]
+> Repo-local overrides are full replacements, not merges. If you override a role, include everything you want the agent to know.
+
+## The --idea flag
+
+For ad-hoc tasks that do not fit a shipped role, use the `--idea` flag to generate a custom role prompt on the fly:
+
+```bash
+sandbox start my-sandbox --idea "migrate all API routes from Express to Hono"
+```
+
+This sends your text description to Claude, which generates a tailored system prompt with appropriate inputs, outputs, and constraints. The generated prompt is saved in the sandbox for inspection and reuse.
+
+The `--idea` flag is useful for one-off tasks, prototyping, or when you want agent behavior that does not map to any of the six standard roles.

@@ -1,0 +1,268 @@
+---
+title: Sandbox
+---
+
+# Sandbox
+
+The sandbox tool creates and manages isolated git worktree sandboxes for Claude Code sessions. Each sandbox is a full worktree with its own branch, role prompts, and state tracking. The sandbox is the fundamental unit of isolation that the composer builds on.
+
+```
+sandbox <command> [options]
+```
+
+## Commands
+
+| Command | Description |
+|:--------|:------------|
+| `sandbox create [opts]` | Create a worktree sandbox without launching Claude |
+| `sandbox start [opts]` | Create a sandbox and launch a Claude role session |
+| `sandbox ralph [opts]` | Run the automated dev/review loop |
+| `sandbox distill [opts]` | Distill an improved feature request from sandbox artifacts |
+| `sandbox retro [opts]` | Extract learnings from review iterations |
+| `sandbox status [target]` | Show sandbox status (commits, diff, process state) |
+| `sandbox size [target]` | Show sandbox/worktree disk usage |
+| `sandbox clean [target]` | Remove sandbox (worktree, branch, state) |
+| `sandbox list` | List all sandboxes with status, mode, size, and branch |
+| `sandbox roles` | List available role prompts |
+
+Running `sandbox` with no arguments or `--help` displays full usage information.
+
+---
+
+## Worktree Layout
+
+Sandboxes are created as git worktrees in a sibling directory alongside your repo:
+
+```
+myrepo/                          # Your main repository
+myrepo-sandboxes/                # Sandbox worktree root
+  users-you-worktree-a1b2/       # One sandbox (slug derived from branch name)
+    feature-request.md           # Context seeded from --context
+    prompts/                     # Role prompt files copied from package
+      analyst.md
+      architect.md
+      developer.md
+      reviewer.md
+    comments.md                  # Reviewer output (created by ralph)
+    ralph-log.md                 # Ralph iteration log
+    sandbox.code-workspace       # VS Code workspace with color customizations
+    bin/                         # Sandbox-specific shims (yarn interceptor)
+    tools/                       # Sandbox helper scripts
+    .claude/settings.json        # Permissive Claude settings for sandbox
+```
+
+The sandbox directory name (slug) is derived from the branch name by replacing slashes with dashes. For example, `users/you/worktree-a1b2` becomes `users-you-worktree-a1b2`.
+
+Node modules are symlinked from the main repo by default (each entry in `node_modules/` is individually linked to avoid bundler issues). Use `--setup` to run a full `yarn predev` install instead.
+
+---
+
+## Create Options
+
+Create a worktree sandbox without launching any Claude session. This is useful when you want to set up the sandbox first and launch sessions manually.
+
+```
+sandbox create [options]
+
+--branch <name>      Custom branch name (default: auto-generated)
+--base <branch>      Base branch (default: master)
+--context <text>     Context string seeded as feature-request.md
+--context-file <f>   Read context from a file
+--setup              Run full yarn predev instead of symlinking node_modules
+```
+
+If `--branch` is omitted, a branch is auto-generated in the form `users/<git-user>/worktree-<hash>`.
+
+---
+
+## Start Options
+
+Create a sandbox and immediately launch a Claude session inside it.
+
+```
+sandbox start [options]
+
+--role <name>          Role to run (e.g. analyst, architect, developer)
+--idea <text>          Auto-generate a custom role from an idea description
+--context <text>       Context string seeded as feature-request.md
+--context-file <f>     Read context from a file
+--branch <name>        Custom branch name (default: auto-generated)
+--base <branch>        Base branch (default: master)
+--model <model>        Model to use (default: opus)
+--headless             Run without interactive terminal (background mode)
+--ralph                Start in automated dev/review mode
+--max-iterations <n>   Max dev/review iterations (default: 10)
+--setup                Run full yarn predev (default: symlink node_modules)
+--skip-sandbox         Reuse an existing sandbox (requires --branch)
+```
+
+You must provide either `--role` or `--idea` (but not both) unless using `--ralph` mode. Context (`--context` or `--context-file`) is always required unless using `--skip-sandbox`.
+
+When `--idea` is used instead of `--role`, the tool generates a custom system prompt tailored to the idea using Claude, saves it as `prompts/custom.md`, and launches the session with it.
+
+### Examples
+
+```bash
+# Interactive architect session
+sandbox start --role architect --context "Add caching layer to API"
+
+# Automated dev/review with 5 iterations
+sandbox start --ralph --context "Fix login bug" --max-iterations 5
+
+# Custom idea-driven session
+sandbox start --idea "Add dark mode support"
+
+# Headless developer on a custom base branch
+sandbox start --role developer --context "Refactor settings" --headless --base main
+```
+
+---
+
+## Ralph Options
+
+Run the automated developer/reviewer iteration loop on an existing sandbox. Ralph alternates between a developer agent and a reviewer agent until the review is clean, the iteration limit is reached, or the user intervenes.
+
+```
+sandbox ralph [options]
+
+--branch <name>          Branch to run on (required)
+--max-iterations <n>     Max iterations (default: 10)
+--model <model>          Model to use (default: sonnet)
+--headless               Run without interactive terminal
+--review                 Start with the review step instead of development
+--no-agents              Disable agent teams (fully automated -p mode)
+--composer-session <id>  Link to a composer session for metrics tracking
+```
+
+### How Ralph Works
+
+Each iteration of the ralph loop consists of two phases:
+
+1. **Developer phase** -- The developer agent reads `feature-request.md` (first iteration) or `comments.md` (subsequent iterations) and implements or fixes code. Changes are committed automatically.
+
+2. **Reviewer phase** -- The reviewer agent examines the changes and writes `comments.md` with categorized findings (Must Fix, Should Fix, Consider).
+
+Between iterations in interactive mode, the user can:
+- **Continue** to the next iteration (the developer will address the reviewer's comments)
+- **Ignore** specific comments (they are recorded in `ignored-comments.txt` and excluded from future developer instructions)
+- **Stop** the loop early
+
+The loop exits when:
+- The reviewer reports no Must Fix or Should Fix items
+- The maximum iteration count is reached
+- The user manually stops
+
+Press `a` during the ralph loop to toggle auto-advance mode, which skips the interactive prompt between iterations and continues automatically.
+
+Progress is logged to `ralph-log.md` in the sandbox, and raw session logs are saved as `ralph-dev-N.log` and `ralph-rev-N.log` for each iteration.
+
+---
+
+## Status Options
+
+Show detailed status of a specific sandbox, including git diff stats, commit history since the base branch, and process state for headless sessions.
+
+```
+sandbox status [options]
+
+<short-id>         Lookup by short ID (slug from 'sandbox list')
+--branch <name>    Lookup by branch name
+--id <slug>        Lookup by slug
+
+(no args)          Falls back to 'sandbox list'
+```
+
+---
+
+## Size Options
+
+Show disk usage of sandbox worktrees.
+
+```
+sandbox size [options]
+
+<short-id>         Size of a specific sandbox
+--branch <name>    Size by branch name
+
+(no args)          Show sizes for all sandboxes with total
+```
+
+---
+
+## Clean Options
+
+Remove a sandbox, including its worktree directory, git branch, and state file.
+
+```
+sandbox clean [options]
+
+<short-id>         Clean by short ID (from 'sandbox list')
+--branch <name>    Clean by branch name
+--all              Clean all sandboxes
+--stopped          Clean stopped sandboxes only
+--active           Clean active sandboxes only
+--running          Clean running sandboxes only
+--missing          Clean sandboxes with missing worktrees
+--orphans          Clean orphaned worktree directories (no state file)
+--keep-branch      Keep the git branch after cleanup
+--force            Skip confirmation prompts
+
+(no args + TTY)    Interactive picker showing all sandboxes
+```
+
+When run with no arguments in an interactive terminal, the clean command displays a numbered list of all sandboxes and prompts you to select one by number, short ID, or flag.
+
+### Examples
+
+```bash
+# Interactive picker
+sandbox clean
+
+# Clean a specific sandbox by short ID
+sandbox clean a1b2
+
+# Clean all stopped sandboxes without prompting
+sandbox clean --stopped --force
+
+# Remove sandbox but keep the git branch
+sandbox clean a1b2 --keep-branch
+
+# Clean orphaned worktree directories
+sandbox clean --orphans
+```
+
+---
+
+## Distill Options
+
+Generate an improved, detailed feature request by analyzing sandbox artifacts (feature-request.md, requirements.md, spec.md).
+
+```
+sandbox distill [options]
+
+--branch <name>    Branch to distill from (required)
+--model <model>    Model to use (default: sonnet)
+```
+
+The distill command sends the sandbox artifacts to Claude headless and synthesizes a refined feature request that incorporates the analyst's requirements and architect's specification.
+
+---
+
+## Retro Options
+
+Extract learnings from the review iterations in a completed ralph loop. Parses all reviewer comments across iterations and synthesizes patterns, recurring issues, and actionable takeaways.
+
+```
+sandbox retro [options]
+
+--branch <name>    Branch to extract learnings from (required)
+--model <model>    Model to use (default: sonnet)
+```
+
+The retro command reads all `ralph-rev-N.log` files from the sandbox, extracts the `comments.md` content written by the reviewer at each iteration, and sends them to Claude for synthesis.
+
+---
+
+## Sandbox Guard
+
+Sandboxes include a pre-tool-use hook (`hooks/sandbox-guard.sh`) that restricts file operations to the sandbox directory via the `SANDBOX_DIR` environment variable. This prevents agents from accidentally modifying files outside the worktree. The sandbox's `.claude/settings.json` is configured with permissive tool permissions since the guard hook provides the isolation boundary.

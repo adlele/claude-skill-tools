@@ -1,0 +1,173 @@
+---
+title: Custom Roles
+---
+
+# Custom Roles
+
+Every agent session in the composer and sandbox is driven by a role prompt -- a markdown file that tells the AI what it is, what to read, and what to produce. You can override the shipped prompts or create entirely new roles.
+
+## View available roles
+
+```bash
+sandbox roles
+```
+
+This lists all roles the sandbox knows about, including any repo-local overrides.
+
+## Understand the prompt format
+
+The shipped prompts live in the package's `prompts/` directory. Each one follows a consistent structure:
+
+- **Identity** -- who the agent is and what it does
+- **Inputs** -- what files and context to read
+- **Outputs** -- what files to produce and their expected format
+- **Constraints** -- boundaries on what the agent can and cannot do
+- **Process** -- step-by-step instructions for the agent to follow
+
+Read one of the shipped prompts (developer, reviewer, analyst, architect) to see the pattern before writing your own.
+
+## Override a shipped prompt
+
+To customize a role for a specific repo, create a file at the same name under `.claude/prompts/`:
+
+```
+.claude/prompts/developer.md
+```
+
+This repo-local file takes precedence over the shipped `developer.md`. The override is scoped to this repo only -- other repos continue using the default.
+
+### Example: add project-specific build commands
+
+If your project uses a non-standard build process, override the developer prompt to include it:
+
+```markdown
+## Build & Test
+
+After making changes, always run:
+
+```bash
+make build-all          # compiles proto files + TypeScript
+npm run test:unit       # fast unit tests only
+npm run lint:fix        # auto-fix lint issues before committing
+```
+
+Do NOT run `npm run build` directly -- it will fail without the proto compilation step.
+```
+
+Add this section to a copy of the shipped developer.md and save it as `.claude/prompts/developer.md`.
+
+## Create a new role
+
+Create a markdown file under `.claude/prompts/` with any name:
+
+```
+.claude/prompts/security-reviewer.md
+```
+
+Then use it in a composition:
+
+```bash
+composer compose role --role security-reviewer \
+  --context "Review the authentication flow for vulnerabilities"
+```
+
+Or directly in the sandbox:
+
+```bash
+sandbox start --role security-reviewer
+```
+
+### Example: security reviewer prompt
+
+```markdown
+# Security Reviewer
+
+You are a security-focused code reviewer. Your job is to identify
+vulnerabilities, insecure patterns, and missing safeguards.
+
+## Inputs
+
+Read these files in the worktree:
+- The git diff (`git diff main...HEAD`)
+- Any files touched in the diff
+
+## Process
+
+1. Review every changed file for common vulnerability classes:
+   - Injection (SQL, command, path traversal)
+   - Authentication and authorization gaps
+   - Sensitive data exposure (secrets in code, logs, error messages)
+   - Insecure defaults (permissive CORS, missing rate limits)
+   - Dependency risks (known CVEs in new dependencies)
+
+2. For each finding, include:
+   - File and line number
+   - Vulnerability class
+   - Severity (critical, high, medium, low)
+   - Suggested fix
+
+## Output
+
+Write your findings to `security-review.md` in the worktree root.
+
+## Constraints
+
+- Do NOT modify any source code.
+- Do NOT review files outside the diff.
+- Focus on security only -- ignore style, performance, and refactoring.
+```
+
+## The --idea flag
+
+If you do not want to write a full prompt file, use `--idea` to have Claude generate one on the fly:
+
+```bash
+sandbox start \
+  --idea "A performance auditor that profiles endpoints and suggests optimizations"
+```
+
+Claude reads your description and generates a system prompt dynamically. The generated prompt is used for that session only -- it is not saved to disk.
+
+This is useful for one-off experiments. If you find yourself re-using the same idea, save it as a proper prompt file.
+
+## Best practices for writing role prompts
+
+**Tell the AI what TO do, not what NOT to do.** Positive instructions are clearer and more reliable than negative ones.
+
+```markdown
+# Good
+Write tests for every public function.
+
+# Less effective
+Don't forget to write tests.
+```
+
+**Define clear inputs.** Tell the agent exactly which files or artifacts to read. Agents that have to search for context waste tokens and time.
+
+```markdown
+## Inputs
+- Read `requirements.md` for acceptance criteria
+- Read `spec.md` for the architectural design
+- Read the git diff for the current changes
+```
+
+**Define clear outputs.** Specify the file name, format, and section headings for every artifact the agent should produce.
+
+```markdown
+## Output
+Write `test-plan.md` with the following sections:
+- **Scope** -- what is being tested
+- **Test cases** -- table with columns: ID, description, input, expected output
+- **Edge cases** -- list of boundary conditions to verify
+```
+
+**Set explicit boundaries.** Tell the agent what it cannot do. This prevents role drift where a reviewer starts writing code or an analyst starts designing architecture.
+
+```markdown
+## Constraints
+- Do NOT modify source code
+- Do NOT create new files other than test-plan.md
+- Do NOT make assumptions about requirements -- ask if something is unclear
+```
+
+**Include output format with section headings.** Structured output is easier to review and easier for downstream agents to parse.

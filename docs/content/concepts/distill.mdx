@@ -1,0 +1,104 @@
+---
+title: Distill
+---
+
+# Distill
+
+Distill synthesizes an improved, self-contained feature request from planning artifacts. Its purpose is to collapse the outputs of the analyst and architect into a single document with zero ambiguity -- a document good enough that a developer agent can implement it without asking questions.
+
+## What is distill?
+
+After the analyst produces `requirements.md` and the architect produces `spec.md`, you have three documents that describe the same feature from different angles. These documents may contain redundancies, contradictions, or gaps that only become apparent when a developer tries to implement them.
+
+Distill reads all three artifacts and produces a single improved feature request that:
+
+- Resolves contradictions between the original request and the planning artifacts
+- Fills gaps identified during analysis and architecture
+- Removes ambiguity that would cause the developer to guess or ask questions
+- Preserves every concrete decision made during planning
+
+## Inputs and outputs
+
+**Inputs:**
+
+| Artifact | Source |
+|:---------|:-------|
+| `feature-request.md` | The original request you provided |
+| `requirements.md` | Produced by the analyst role |
+| `spec.md` | Produced by the architect role |
+
+**Outputs:**
+
+| Artifact | Description |
+|:---------|:------------|
+| `improved-feature-request.md` | A zero-ambiguity feature request that stands alone -- no need to reference the original artifacts |
+| `feature-request-changes-summary.md` | A diff-style summary listing what was added, clarified, or scoped out relative to the original request |
+
+## The zero-intervention flywheel
+
+Distill enables a powerful two-pass workflow:
+
+1. **First pass (full composition):** Run the full pipeline (analyst, architect, ralph) with your original, possibly vague feature request. Review the results.
+2. **Distill:** Synthesize the planning artifacts into an improved feature request.
+3. **Second pass (ralph-only):** Run ralph-only with the improved feature request. Because the input is unambiguous, this pass can run fully automated with high confidence.
+
+```bash
+# First pass -- full pipeline with planning
+composer compose full --context feature-request.md
+
+# Distill the results
+composer distill my-session
+
+# Second pass -- ralph-only with the improved request
+composer compose ralph-only \
+  --context-file <worktree>/improved-feature-request.md
+```
+
+The second pass typically produces cleaner code in fewer iterations because the developer agent is not guessing at requirements.
+
+> [!NOTE]
+> The flywheel works best when the first pass reveals gaps in your original request. If the analyst and architect did not surface anything new, distill adds little value -- just run ralph-only directly.
+
+## --from-impl mode
+
+Distill can also work in reverse -- generating a feature request from the actual implementation:
+
+```bash
+sandbox distill my-sandbox --from-impl
+```
+
+In this mode, distill reads the **git diff** between the sandbox branch and the base branch, then synthesizes a feature request describing what was actually built. The output is written to `implementation-feature-request.md`.
+
+This is useful for:
+
+- **Documentation:** You built something ad-hoc and need to document it after the fact
+- **Comparison:** Diff the implementation-feature-request against the original to see what diverged
+- **Onboarding:** Generate a clear description of what a branch does for teammates who were not involved
+
+## Auto-distill
+
+In the `full` composition, distill runs automatically after the architect step and before ralph begins. This ensures the developer agent always receives the best possible input without manual intervention.
+
+The auto-distill step is transparent -- it runs headlessly and deposits the improved feature request into the sandbox. Ralph then picks it up as its context.
+
+## Available from both CLIs
+
+Distill is accessible from both the composer and sandbox CLIs:
+
+```bash
+# From composer -- operates on a composer session
+composer distill <session-id>
+
+# From sandbox -- operates on a sandbox by slug
+sandbox distill <sandbox-slug>
+```
+
+The composer variant looks up the session state to find the associated sandbox and worktree. The sandbox variant operates directly on the specified sandbox.
+
+## Role digest exclusion
+
+To improve the specificity of distill's output, the process extracts section headings from the role prompts (analyst and architect) and instructs the model to **not** repeat generic guidance that already exists in those prompts.
+
+For example, if the analyst prompt has a section titled "How to handle edge cases," distill will tell the synthesis model to omit generic edge-case guidance and focus only on the specific edge cases identified for this feature.
+
+This prevents the improved feature request from ballooning with boilerplate that the agent already receives through its role prompt.

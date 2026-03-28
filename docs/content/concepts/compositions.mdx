@@ -1,0 +1,117 @@
+---
+title: Compositions
+---
+
+# Compositions
+
+A composition is the unit of orchestration in claude-skill-tools. It defines a complete workflow as a sequence of typed steps that run in order, from initial planning through to pull request creation.
+
+## What is a composition?
+
+A composition is a named array of **Step** objects. Each step has three required properties:
+
+- **label** -- a human-readable name shown in the UI (e.g., "Analyst session")
+- **type** -- one of the seven step types described below
+- **command** -- a shell command template with `{placeholder}` variables resolved at runtime
+
+Steps run sequentially. After each step completes, the runner prompts you for the next action unless auto-advance is configured.
+
+## Composition types
+
+Five built-in compositions cover the most common workflows:
+
+| Type | Steps | Best for |
+|:-----|:------|:---------|
+| **full** | analyst, architect, ralph, PR | Ambiguous or complex requirements that need planning before implementation |
+| **ralph-only** | sandbox-create, ralph | Skipping planning when the feature request is already clear -- the fastest path to code |
+| **manual** | All interactive sessions | Maximum control -- every step is a live Claude session you drive |
+| **role** | Single role session | Running one specific role (e.g., just the analyst or just the reviewer) |
+| **headless** | Background execution | Fire-and-forget runs -- no interactive prompts, results collected later |
+
+> [!NOTE]
+> Choose `full` when requirements are vague or multi-faceted. Choose `ralph-only` when you already have a precise feature request (especially one produced by [distill](distill)).
+
+## Step types
+
+Each step in a composition has one of seven types. The type determines how the runner executes and tracks the step.
+
+| Step type | What it does |
+|:----------|:-------------|
+| **sandbox-create** | Creates a new git worktree sandbox with branch, prompts, and feature request. Captures worktree path and branch name into session state. |
+| **sandbox-start** | Launches a role session inside an existing sandbox. Used when the sandbox already exists from a prior step or a resumed session. |
+| **claude-interactive** | Opens a live, interactive Claude session. You drive the conversation. The session transcript is saved. |
+| **ralph** | Runs the automated [developer/reviewer loop](ralph). Headless by default inside compositions. |
+| **status-check** | Pauses the pipeline and shows current session state -- branch, worktree, iteration count, artifacts produced. Useful as a checkpoint. |
+| **pr-dry-run** | Generates a pull request description from sandbox artifacts without actually creating the PR. Lets you review before committing. |
+| **ado-pr-create** | Pushes the branch and creates an Azure DevOps pull request. Builds the PR description from feature-request.md, spec.md, tasks.md, ralph-log.md, and comments.md. |
+
+## Template variables
+
+Step commands use `{placeholder}` syntax for values resolved at runtime. The runner substitutes these before executing the shell command.
+
+| Variable | Resolved from |
+|:---------|:--------------|
+| `{worktree}` | Sandbox worktree path (set after sandbox-create) |
+| `{branch}` | Git branch name for the sandbox |
+| `{model}` | Claude model identifier (e.g., `opus`, `sonnet`) |
+| `{context}` | Path to the feature request or context file |
+| `{max_iterations}` | Maximum ralph iterations |
+| `{session_id}` | Composer session ID |
+| `{role}` | Role name (analyst, architect, developer, etc.) |
+| `{base_branch}` | The branch to diff against for PRs |
+| `{sandbox}` | Sandbox slug |
+| `{pr_script}` | Path to the PR creation script |
+
+Unresolved placeholders cause the step to fail with a clear error listing the missing variables.
+
+## Session state
+
+Every composition run is tracked as a **session state** JSON file at:
+
+```
+<repo>/.claude/.skill-state/composer/<sessionId>.json
+```
+
+Key fields:
+
+| Field | Description |
+|:------|:------------|
+| `sessionId` | Unique identifier for this run |
+| `composition` | Name of the composition being executed |
+| `currentStep` | Index of the current step |
+| `status` | One of `in_progress`, `paused`, or `completed` |
+| `context` | Path to the context file / feature request |
+| `model` | Claude model used |
+| `maxIterations` | Ralph iteration cap |
+| `branch` | Git branch created for this session |
+| `worktree` | Path to the sandbox worktree |
+| `stepTimings` | Array of start/end timestamps per step |
+
+Resume a paused or interrupted session:
+
+```bash
+composer resume <sessionId>
+```
+
+The runner picks up from the last incomplete step.
+
+## Auto-advance
+
+Steps can be marked with `autoAdvance: true` in the composition definition. Auto-advance steps begin executing immediately when the previous step finishes, with no prompt.
+
+Steps that are **not** auto-advance present an interactive prompt after the first manual confirmation. Subsequent steps use a **10-second countdown** -- if you do nothing, the next step runs automatically. Press any key during the countdown to pause and choose manually.
+
+The interactive prompt supports:
+- **n** -- next (run the next step)
+- **s** -- skip (skip the next step)
+- **p** -- prev (re-run the previous step)
+- **q** -- quit (pause the session for later resume)
+
+## Auto-retry
+
+Certain step types are **retryable**: `sandbox-create`, `sandbox-start`, `claude-interactive`, and `ralph`. If a retryable step fails, the runner automatically retries up to **2 times** with a backoff schedule of **[5, 10] seconds** between attempts.
+
+Non-retryable steps (status-check, pr-dry-run, ado-pr-create) fail immediately and pause the session. You can fix the issue and resume.
+
+> [!WARNING]
+> If a step keeps failing after retries, the session is paused. Use `composer resume` after diagnosing the problem.

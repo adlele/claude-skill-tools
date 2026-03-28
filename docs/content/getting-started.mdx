@@ -1,0 +1,125 @@
+---
+title: Getting Started
+---
+
+# Getting Started
+
+Get up and running with claude-skill-tools in under 5 minutes.
+
+---
+
+## Prerequisites
+
+| Requirement | Notes |
+|:------------|:------|
+| **Node.js >= 18** | Required |
+| **Git** | Required |
+| **Claude Code CLI** | `claude` command must be in your PATH ([install guide](https://docs.anthropic.com/en/docs/claude-code)) |
+| **Azure CLI** | Optional -- only needed for ADO work item fetching and PR creation |
+| **tmux** | Optional -- enables split-pane execution with live status |
+
+## Installation
+
+### From npm
+
+```bash
+npm install -g claude-skill-tools
+```
+
+### From source
+
+```bash
+git clone https://github.com/anthropics/claude-skill-tools.git
+cd claude-skill-tools
+npm install
+npm run build
+npm link
+```
+
+## Verify Installation
+
+```bash
+composer list          # Shows available composition types
+sandbox roles          # Shows available role prompts
+session-explorer --help
+```
+
+You should see output listing the 5 composition types (`full`, `ralph-only`, `manual`, `role`, `headless`) and the 6 role prompts (`analyst`, `architect`, `developer`, `developer_single`, `reviewer`, `tester`).
+
+## Your First Composition
+
+The fastest way to see composer in action is `ralph-only` -- it skips the analyst/architect planning steps and goes straight to automated dev/review:
+
+```bash
+composer compose ralph-only --context "Add a health check endpoint that returns 200 OK at GET /health"
+```
+
+Here's what happens:
+
+1. **Sandbox creation** -- A git worktree is created in a sibling directory with its own branch. Your `feature-request.md` is seeded with the context you provided.
+
+2. **Ralph loop** -- The developer agent implements the feature, then the reviewer agent reviews the code. If the reviewer finds issues, the developer gets another pass. This repeats until the review is clean or max iterations are reached.
+
+3. **PR step** -- You're prompted to preview and create a pull request.
+
+### The Stepper UI
+
+During execution, each step pauses with an interactive prompt:
+
+```
+Step 2/4: Run Ralph Loop
+  [n] run  [s] skip  [p] prev  [q] quit  [?] status
+```
+
+| Key | Action |
+|:----|:-------|
+| **n** / **Enter** | Run the current step |
+| **s** | Skip this step |
+| **p** | Go back to the previous step |
+| **q** | Quit (session is saved -- resume with `composer resume`) |
+| **?** | Show current session status and pipeline |
+
+After the first manual prompt, subsequent steps use a 10-second countdown with auto-run.
+
+## Understanding the Output
+
+After a composition runs, you'll find these artifacts in the sandbox worktree:
+
+| File | Created by | Purpose |
+|:-----|:-----------|:--------|
+| `feature-request.md` | Sandbox create | Your original context, seeded at creation |
+| `requirements.md` | Analyst role | Clarified requirements (full composition only) |
+| `spec.md` | Architect role | Technical specification (full composition only) |
+| `comments.md` | Reviewer role | Latest code review feedback |
+| `ralph-log.md` | Ralph loop | Iteration history with timestamps |
+| `ignored-comments.txt` | User | Comments you chose to skip |
+
+## Session Management
+
+```bash
+# List all sessions
+composer sessions
+
+# Resume a paused session (use the short ID shown in 'sessions')
+composer resume a1b2
+
+# Clean up completed sessions
+composer clean --completed
+
+# Clean everything (sessions + sandboxes)
+composer clean --all
+```
+
+## Gitignore Setup
+
+Add the state directory to your `.gitignore`:
+
+```
+.claude/.skill-state/
+```
+
+## Next Steps
+
+- **[Usage Guide](/guide/)** -- Full command reference for composer, sandbox, and session-explorer
+- **[Concepts](/concepts/)** -- Understand compositions, roles, ralph, and distill in depth
+- **[Cookbook: Your First Feature](/cookbook/first-feature/)** -- End-to-end walkthrough with the full composition

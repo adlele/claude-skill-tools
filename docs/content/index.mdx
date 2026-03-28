@@ -1,0 +1,69 @@
+---
+title: Home
+---
+
+# claude-skill-tools
+
+A collection of AI development tools, primarily built with Claude Code CLI in mind. These docs focus mostly on the Composer tool, but more will be added over time.
+
+[Get Started](/getting-started/)
+[View on GitHub](https://github.com/anthropics/claude-skill-tools)
+
+---
+
+## What is claude-skill-tools?
+
+**claude-skill-tools** is a collection of AI development tools that help you get more out of Claude Code CLI. The centerpiece today is the **Composer** -- an orchestration engine that chains specialized AI agent roles into structured development workflows. Instead of one AI agent doing everything, it breaks work into bounded steps -- analyst, architect, developer, reviewer -- each with its own system prompt, inputs, and outputs.
+
+The result is higher-quality code with built-in review cycles, isolated in git worktrees so agents never touch your main branch.
+
+Three CLI tools are included so far:
+
+- **Composer** -- Orchestrate multi-step compositions with session state, auto-retry, and tmux integration
+- **Sandbox** -- Create isolated git worktree environments with role-based system prompts and a PreToolUse guard hook
+- **Session Explorer** -- Deep-dive analysis of individual Claude sessions with timeline visualization and cost tracking
+
+## Key Capabilities
+
+| Capability | Description |
+|:-----------|:------------|
+| **Multi-step compositions** | Chain analyst, architect, developer, and reviewer roles into automated pipelines |
+| **The Ralph loop** | Automated developer/reviewer iteration cycle until review is clean |
+| **Git worktree isolation** | Each sandbox gets its own branch and directory -- agents can't modify your repo |
+| **Role prompt overrides** | Customize any shipped role per-repo via `.claude/prompts/` |
+| **Distill & re-run** | Synthesize improved feature requests from planning artifacts for zero-intervention second passes |
+| **Session metrics** | Track token usage, cost, and tool calls per composition step |
+| **ADO integration** | Fetch work items and create pull requests via Azure DevOps |
+| **Tmux integration** | Split-pane execution with live status for ralph iterations |
+
+## Quick Example
+
+```bash
+# Start a full workflow from an ADO work item
+composer compose full --ado 12345
+
+# Or with inline context
+composer compose ralph-only --context "Add dark mode support to the settings page"
+```
+
+The full composition runs: **sandbox creation** → **analyst** (produces `requirements.md`) → **architect** (produces `spec.md`) → **auto-distill** → **ralph loop** (automated dev/review iterations) → **PR creation**.
+
+## When to Use Composer
+
+Composer adds value when:
+
+- The task spans multiple files, layers, or modules that need to stay consistent
+- Requirements are ambiguous enough to benefit from analyst → architect refinement
+- The work would normally take multiple sessions or PRs to complete
+
+If the task fits in one commit and one mental context, use Claude Code directly -- Composer adds overhead, not value, for small tasks.
+
+## Explore the Docs
+
+- **[Getting Started](/getting-started/)** -- Install, configure, run your first composition
+- **[Usage Guide](/guide/)** -- Complete command reference for all three CLI tools
+- **[Concepts](/concepts/)** -- Deep dives into compositions, roles, ralph, sandboxes, distill, and retro
+- **[Cookbook](/cookbook/)** -- Step-by-step recipes for common workflows
+- **[Vision & Philosophy](/vision/)** -- Why this tool exists and the principles behind it
+- **[Architecture](/architecture/)** -- System design and project structure
+- **[Contributing](/contributing/)** -- How to contribute to the project

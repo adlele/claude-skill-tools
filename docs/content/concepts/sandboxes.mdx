@@ -1,0 +1,131 @@
+---
+title: Sandboxes
+---
+
+# Sandboxes
+
+A sandbox is an isolated git worktree with its own branch, directory, and prompt files. Sandboxes prevent AI agents from modifying your main repository, ensuring that all generated code lives in a controlled, disposable environment.
+
+## What is a sandbox?
+
+When you run `sandbox create`, the tool creates a new git worktree branched from your current HEAD. The agent operates entirely within this worktree. Your main working tree remains untouched -- no uncommitted changes, no surprise file modifications, no risk to your work in progress.
+
+Sandboxes are cheap to create and easy to discard. The intended workflow is: create a sandbox, run one or more agent sessions in it, review the results, then either merge the branch or delete the sandbox.
+
+## Worktree location
+
+Sandboxes are created as sibling directories to your repository:
+
+```
+myrepo/                          # your main repository
+myrepo-sandboxes/
+  ├── add-auth-flow/             # sandbox worktree
+  ├── fix-memory-leak/           # another sandbox
+  └── refactor-api-routes/       # another sandbox
+```
+
+The parent directory `myrepo-sandboxes/` is created automatically on first use. Each sandbox gets a subdirectory named after its slug.
+
+## What gets created
+
+When a sandbox is created, the following happens:
+
+1. **Branch** -- A new git branch is created from the current HEAD (or a specified base branch)
+2. **Worktree** -- `git worktree add` creates the isolated directory
+3. **Prompt files** -- Role prompts are copied from the package (or repo-local overrides) into the worktree
+4. **Feature request** -- `feature-request.md` is seeded from the context file or `--idea` text you provide
+5. **Node modules** -- By default, `node_modules` is symlinked from the main repo to avoid duplication. Use `--setup` to run a full install instead.
+
+```bash
+# Basic sandbox creation
+sandbox create my-feature --context feature-request.md
+
+# With full dependency install instead of symlink
+sandbox create my-feature --context feature-request.md --setup
+
+# From a specific base branch
+sandbox create my-feature --context feature-request.md --base develop
+```
+
+## The sandbox guard hook
+
+The sandbox guard is a **PreToolUse hook** that restricts Claude's file operations to the sandbox directory. It is the primary safety mechanism preventing agents from modifying files outside their sandbox.
+
+The guard is implemented as `hooks/sandbox-guard.sh` (with a TypeScript equivalent at `src/sandbox/sandbox-guard.ts`). It works by:
+
+1. Intercepting every Write, Edit, and Bash tool call before execution
+2. Checking whether the target path falls within the `SANDBOX_DIR` environment variable
+3. **Blocking** operations that target files outside the sandbox -- Claude receives an error and must adjust
+4. **Allowing** operations inside the sandbox but logging suspicious patterns to `audit-raw.jsonl`
+
+> [!NOTE]
+> The sandbox guard is automatically configured when you use `sandbox start` or `sandbox ralph`. If you run Claude manually inside a worktree, set the `SANDBOX_DIR` environment variable and add the hook to your settings to get the same protection.
+
+## Audit logging
+
+Every tool call made during a sandbox session is recorded in `audit-raw.jsonl` with structured metadata:
+
+| Field | Description |
+|:------|:------------|
+| `decision` | Whether the tool call was allowed or blocked |
+| `severity` | Risk level of the operation |
+| `confidence` | Guard's confidence in its decision |
+| `reason` | Why the decision was made |
+
+When ralph completes, it generates `audit-log.md` -- a human-readable summary of all tool calls, organized by type and highlighting any blocked or suspicious operations.
+
+```bash
+# View the audit log after a ralph session
+cat ../myrepo-sandboxes/my-feature/audit-log.md
+```
+
+## Disk usage
+
+Worktrees share the git object database with the main repo, so they are lightweight in terms of git data. However, dependency directories like `node_modules` can be large.
+
+**The problem:** 5 sandboxes, each with its own `node_modules`, can consume gigabytes of disk space.
+
+**The default solution:** Sandboxes symlink `node_modules` from the main repository. This means all sandboxes share the same dependencies with zero additional disk cost.
+
+**When to use `--setup`:** If your sandbox needs different dependencies (e.g., you are adding a new package), use the `--setup` flag to run a full install. This creates a real `node_modules` in the sandbox.
+
+Monitor and manage disk usage:
+
+```bash
+# Check size of all sandboxes
+sandbox size
+
+# Check size from composer
+composer size
+
+# Remove all sandboxes and reclaim disk space
+sandbox clean --all
+
+# Remove a specific sandbox
+sandbox clean my-feature
+```
+
+> [!NOTE]
+> Run `sandbox clean --all` periodically to reclaim disk space from completed work. Worktrees are cheap to recreate if you still have the branch.
+
+## State storage
+
+Each sandbox has a state file at:
+
+```
+<repo>/.claude/.skill-state/sandbox/<slug>.json
+```
+
+The state file tracks:
+
+| Field | Description |
+|:------|:------------|
+| `branch` | Git branch name |
+| `slug` | Sandbox identifier (URL-safe name) |
+| `worktree` | Absolute path to the worktree directory |
+| `pid` | Process ID of the running agent (if active) |
+| `mode` | Current mode (e.g., `ralph`, `interactive`) |
+| `model` | Claude model being used |
+| `created` | ISO timestamp of creation |
+
+This state file is how commands like `sandbox list`, `sandbox ralph`, and `composer resume` find and manage sandboxes. Deleting the state file orphans the worktree -- use `sandbox clean` instead.

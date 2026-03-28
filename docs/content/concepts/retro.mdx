@@ -1,0 +1,80 @@
+---
+title: Retro
+---
+
+# Retro
+
+Retro extracts reusable learnings from ralph review iterations and turns them into persistent guidance. Instead of repeating the same mistakes across sessions, retro captures what the reviewer caught and feeds it back into future runs.
+
+## What is retro?
+
+After a multi-iteration ralph session, the reviewer has likely flagged issues that the developer agent got wrong on the first (or second, or third) attempt. These findings represent real knowledge about your codebase -- its conventions, its pitfalls, its quality bar.
+
+Retro reads the review logs from a completed ralph session, synthesizes the findings, and produces a structured document of learnings that can be appended to your repository's CLAUDE.md.
+
+## How it works
+
+1. **Read review logs:** Retro finds all `ralph-rev-N.log` files from the ralph session
+2. **Extract comments:** It parses the `comments.md` content from each iteration, capturing what the reviewer flagged and whether it was fixed in subsequent iterations
+3. **Synthesize:** The extracted comments are sent to Claude, which identifies patterns, recurring issues, and lessons learned
+4. **Output:** The result is written to `retro-learnings.md`
+
+The synthesis step is the key differentiator from simply re-reading the logs. Claude identifies which issues were one-off mistakes versus systemic patterns, and distills them into actionable guidance.
+
+## Output format
+
+`retro-learnings.md` is organized into four sections:
+
+| Section | What it captures |
+|:--------|:-----------------|
+| **Recurring patterns** | Issues that appeared in multiple iterations -- these are the highest-value learnings because they indicate systematic gaps |
+| **Codebase conventions** | Style rules, naming patterns, and structural decisions that the reviewer enforced -- things a new agent session would not know |
+| **Common pitfalls** | Mistakes the developer agent made that are likely to recur in similar tasks |
+| **Quality bar expectations** | The level of rigor the reviewer expects -- test coverage standards, error handling requirements, documentation expectations |
+
+## Appending to CLAUDE.md
+
+After generating `retro-learnings.md`, retro prompts you to optionally append the learnings to your repository's CLAUDE.md file:
+
+```
+Retro learnings generated at:
+  ../myrepo-sandboxes/my-feature/retro-learnings.md
+
+Append to repo CLAUDE.md? (y/n)
+```
+
+If you accept, the learnings are appended under a clearly marked section. Future Claude sessions that read CLAUDE.md will benefit from these learnings automatically -- the agent will know about your codebase's conventions and pitfalls before it writes a single line of code.
+
+> [!WARNING]
+> Review the learnings before appending. Not every finding from a specific feature is universally applicable. Remove or edit items that are too narrow before adding them to CLAUDE.md.
+
+## When to use retro
+
+Retro is most valuable after ralph sessions where the reviewer caught **recurring** issues across multiple iterations:
+
+- The developer kept writing tests without assertions
+- The developer forgot to handle error cases in async functions
+- The developer used a deprecated API pattern that the codebase has moved away from
+
+Retro adds less value after:
+
+- **Clean one-iteration passes** -- nothing went wrong, so there is nothing to learn
+- **Single Must Fix items** -- one-off bugs do not indicate a pattern
+- **Sessions where most comments were Nitpicks** -- style preferences are useful but lower priority
+
+> [!NOTE]
+> A good rule of thumb: if ralph took 3 or more iterations, run retro. If it completed in 1-2 iterations with minor comments, skip it.
+
+## Available from both CLIs
+
+Retro is accessible from both the composer and sandbox CLIs:
+
+```bash
+# From composer -- operates on a composer session
+composer retro <session-id>
+
+# From sandbox -- operates on a sandbox by slug
+sandbox retro <sandbox-slug>
+```
+
+Both variants locate the ralph review logs and run the same synthesis process. The composer variant resolves the session to its associated sandbox automatically.

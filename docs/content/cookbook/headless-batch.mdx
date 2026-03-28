@@ -1,0 +1,118 @@
+---
+title: Headless Compositions
+---
+
+# Headless Compositions
+
+A headless composition runs the developer agent in the background with no interactive prompts. You kick it off, walk away, and check the results when it finishes.
+
+## What headless means
+
+In a normal composition, the ralph loop is interactive: you see the reviewer's comments after each iteration and decide whether to continue, ignore comments, or stop. In headless mode, the developer runs unattended. The reviewer still runs after each iteration, but the loop continues automatically until it converges or hits the maximum iteration count.
+
+## Steps
+
+### 1. Start a headless composition
+
+```bash
+composer compose headless \
+  --context "Migrate logger from console.log to winston"
+```
+
+### 2. Sandbox creates automatically
+
+Just like other compositions, the first step creates an isolated worktree and branch.
+
+### 3. Developer launches in the background
+
+The developer agent starts as a detached process. The composer returns control to your terminal immediately. You can continue working, start other compositions, or close your terminal.
+
+### 4. Check status
+
+```bash
+# Check by branch name
+sandbox status --branch <branch>
+
+# Or use the status-check step if running via composer
+composer resume <session-id>
+```
+
+The status shows whether the developer is still running, how many iterations have completed, and whether the reviewer found issues.
+
+### 5. Review results and create PR
+
+When the developer finishes, review the worktree as you would after any composition:
+
+```bash
+# Look at the artifacts
+ls <worktree>/
+
+# Check the ralph log for iteration history
+cat <worktree>/ralph-log.md
+
+# Check the reviewer's comments
+cat <worktree>/comments.md
+
+# Create the PR when satisfied
+composer resume <session-id>   # picks up at the PR step
+```
+
+## When to use headless
+
+**Fire-and-forget for well-defined tasks.** If you can describe the change precisely enough that no interactive guidance is needed, headless saves you from babysitting the loop.
+
+**Running overnight.** Start a composition at end of day, review results in the morning.
+
+**Multiple compositions in parallel.** Each headless composition gets its own sandbox, so they do not interfere with each other:
+
+```bash
+# Start three compositions in parallel
+composer compose headless --context "Add pagination to /api/users"
+composer compose headless --context "Add request logging middleware"
+composer compose headless --context "Migrate config from env vars to YAML"
+```
+
+Check all running sandboxes:
+
+```bash
+sandbox list
+```
+
+## Limitations
+
+**No --skip-sandbox.** Headless compositions always create their own sandbox. You cannot run headless in an existing worktree.
+
+**No interactive review during ralph.** The loop runs to completion (or max iterations) without your input. If the reviewer flags an issue that needs human judgment, the developer will attempt to fix it on its own.
+
+**Must check results after the fact.** There is no notification when the composition finishes. You need to poll with `sandbox status` or `composer resume`.
+
+## Tuning headless runs
+
+Since you cannot intervene during the loop, tuning the parameters upfront matters more:
+
+```bash
+composer compose headless \
+  --context "Add input validation to all API endpoints" \
+  --max-iterations 5 \
+  --model sonnet \
+  --no-agents
+```
+
+- **--max-iterations** -- Cap iterations to control cost. Default is 5 for composer. For headless, err on the lower side since you cannot stop early.
+- **--model sonnet** -- Use a cheaper model when the task is straightforward.
+- **--no-agents** -- Disable sub-agent delegation for simpler execution.
+
+## Example: overnight migration
+
+```bash
+# Friday evening
+composer compose headless \
+  --context-file ./migration-plan.md \
+  --max-iterations 8
+
+# Monday morning
+composer list                          # find the session
+composer report <session-id>           # check cost and iterations
+cat <worktree>/ralph-log.md            # read the iteration history
+composer resume <session-id>           # continue to PR creation
+```

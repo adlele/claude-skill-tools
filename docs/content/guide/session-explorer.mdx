@@ -1,0 +1,107 @@
+---
+title: Session Explorer
+---
+
+# Session Explorer
+
+Session Explorer provides deep-dive analysis of individual Claude Code sessions. It parses the raw `.jsonl` session log files that Claude Code writes during each conversation and produces rich HTML reports or serves an interactive browser for exploring multiple sessions.
+
+```
+session-explorer [sessionId] [options]
+```
+
+## Modes
+
+Session Explorer operates in two modes depending on whether a session ID is provided:
+
+### Browser Mode (no session ID)
+
+```bash
+session-explorer                    # Launch on default port 3456
+session-explorer --port 8080        # Launch on custom port
+```
+
+Starts a local HTTP server that serves an interactive web application. The browser UI includes a sidebar listing all discoverable Claude sessions, and clicking a session loads its full analysis. This is the best way to explore sessions when you don't know the exact session ID.
+
+### Report Mode (with session ID)
+
+```bash
+session-explorer <sessionId>                    # Generate HTML report (opened in browser)
+session-explorer <sessionId> --json             # Output raw JSON analysis to stdout
+session-explorer <sessionId> --out report.html  # Save HTML report to a specific file
+```
+
+Generates a detailed analysis of a single session. The session ID can be a full UUID or a unique prefix -- it will be matched against all known session files.
+
+## Options
+
+| Option | Description |
+|:-------|:------------|
+| `--port <number>` | Port for the session browser server (default: 3456) |
+| `--out <path>` | Custom output path for the HTML report |
+| `--json` | Output raw analysis as JSON instead of HTML |
+| `--help` | Show help message |
+
+---
+
+## Report Features
+
+Each session report contains multiple analysis tabs:
+
+### Metrics Tab
+
+- **Token usage** -- Input tokens, output tokens, and cache reads/writes broken down by role (user, assistant, system)
+- **Cost breakdown** -- Estimated cost based on token counts and model pricing
+- **Tool call distribution** -- Frequency and success rate of each tool used (Read, Edit, Write, Bash, Grep, Glob, etc.)
+- **Model information** -- Which model was used and session duration
+
+### Timeline Tab
+
+- **Full event timeline** -- Every request/response pair in chronological order with human-readable summaries
+- **Tool call details** -- For each assistant turn, which tools were invoked and their arguments/results
+- **Text content** -- User messages and assistant text responses rendered inline
+- **Error tracking** -- Failed tool calls and error messages highlighted
+
+### Subagent Tracking
+
+When a session spawns subagents (e.g., through the Agent tool), their events are merged into the main timeline with visual distinction. Per-subagent metrics (token usage, tool calls) are tracked and displayed separately, so you can see how much work each subagent performed relative to the parent session.
+
+---
+
+## Session Discovery
+
+Session Explorer looks for Claude session files in the standard Claude Code data directories:
+
+- `~/.claude/projects/` -- Project-scoped session files
+- `~/.claude/sessions/` -- Global session files (newer UUID-based format)
+
+Each session is a `.jsonl` file containing one JSON object per line, representing the streaming events from a Claude conversation.
+
+---
+
+## Relationship to Composer Report
+
+The two reporting tools serve different purposes:
+
+| | `composer report` | `session-explorer` |
+|:--|:-------------------|:-------------------|
+| **Scope** | All Claude sessions across a full composition (multiple steps) | Single Claude session in depth |
+| **Use case** | "How much did this entire feature cost?" | "What exactly happened in the architect session?" |
+| **Aggregation** | Sums tokens and costs across all steps | Detailed per-event breakdown within one session |
+| **Timeline** | Step-level overview (which roles ran, in what order) | Event-level detail (every tool call, every message) |
+| **Access** | By composer session ID | By Claude session ID |
+
+Use `composer report` when you want a high-level summary of an entire workflow's resource usage. Use `session-explorer` when you need to understand what happened inside a specific Claude conversation -- for example, to debug why a developer agent made certain decisions or to audit which files a reviewer examined.
+
+### Example Workflow
+
+```bash
+# See all composer sessions and generate an aggregate report
+composer report
+
+# Find the Claude session IDs from the report, then deep-dive into one
+session-explorer 3458a9d0
+
+# Or browse all sessions interactively
+session-explorer
+```

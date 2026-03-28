@@ -1,0 +1,19 @@
+---
+title: Usage Guide
+---
+
+# Usage Guide
+
+claude-skill-tools currently includes three CLI tools. Each serves a distinct purpose in the development lifecycle:
+
+- **Composer** -- The orchestration engine. Runs multi-step compositions that chain together sandbox creation, AI role sessions, automated dev/review loops, and PR creation into a single guided workflow.
+- **Sandbox** -- The worktree manager. Creates isolated git worktree sandboxes, launches Claude sessions within them, and runs the ralph automated dev/review loop. This is the low-level building block that composer orchestrates.
+- **Session Explorer** -- The analysis tool. Parses Claude `.jsonl` session files to produce detailed HTML reports with token usage, cost breakdowns, tool call distributions, and full event timelines.
+
+| Tool | Purpose | Key command |
+|:-----|:--------|:------------|
+| [Composer](composer) | Orchestrate end-to-end workflows | `composer compose full --ado 12345` |
+| [Sandbox](sandbox) | Manage worktree sandboxes and run ralph loops | `sandbox start --role architect --context "..."` |
+| [Session Explorer](session-explorer) | Analyze Claude session logs | `session-explorer <sessionId>` |
+
+All three tools share a common state layer on disk. Composer state lives in `<repo>/.claude/.skill-state/composer/`, sandbox state lives in `<repo>/.claude/.skill-state/sandbox/`, and user-level durable data (session maps, config) lives in `~/claude-skill-tools/`.

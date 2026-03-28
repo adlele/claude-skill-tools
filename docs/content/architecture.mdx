@@ -1,0 +1,270 @@
+---
+title: Architecture
+---
+
+# Architecture
+
+## System Overview
+
+claude-skill-tools is built around three CLI tools -- **composer**, **sandbox**, and **session-explorer** -- plus a shared utility layer. All three tools orchestrate Claude Code CLI sessions in isolated git worktrees, but they serve different purposes:
+
+- **Composer** is the orchestration engine. It runs multi-step compositions that chain specialized agent roles into a workflow.
+- **Sandbox** manages the git worktrees where agents do their work, and runs the ralph developer/reviewer iteration loop.
+- **Session Explorer** parses Claude's JSONL session logs and produces analysis reports or hosts an interactive browser for exploring session data.
+
+The shared layer provides path resolution, ANSI formatting, configuration management, and common utilities used by all three tools.
+
+There are **zero runtime dependencies**. The only packages in `node_modules` are TypeScript and @types/node, both dev dependencies. Every shell command is executed via Node's built-in `child_process` module. Every HTTP server uses Node's built-in `http` module. There is no CLI framework, no argument parser library, no test utility beyond Vitest.
+
+---
+
+## Project Structure
+
+```
+prompts/                      Role prompt markdown files (analyst, architect,
+                              developer, developer_single, reviewer, tester)
+hooks/                        PreToolUse guard hook (sandbox-guard.sh)
+src/
+  bin/                        CLI entry point shims
+    composer.ts                 Re-exports src/composer/composer.ts
+    sandbox.ts                  Re-exports src/sandbox/sandbox.ts
+    session-explorer.ts         Re-exports src/session-explorer/index.ts
+
+  composer/                   Orchestration engine
+    config/
+      compositions.ts           Composition definitions (step sequences)
+      types.ts                  Composition, Step, StepType, SessionState types
+    composer.ts                 CLI entry: arg parsing, welcome banner, signal handlers
+    commands.ts                 All command implementations (compose, distill, report)
+    execution.ts                Step loop: runComposition(), template resolution,
+                                interactive prompt (n/s/p/q)
+    state.ts                    JSON state persistence (load/save SessionState)
+    tmux.ts                     Split-pane execution for tmux environments
+
+  sandbox/                    Worktree management and ralph loop
+    config/
+      paths.ts                  Sandbox-specific path constants
+      types.ts                  SandboxState, RalphIteration types
+    sandbox.ts                  CLI entry: command dispatch, worktree create/delete/list
+    ralph-helpers.ts            Agent execution: runAgentWithTimer() (headless with
+                                progress), runInteractiveAgentWithLog() (interactive
+                                with transcript), generateReadableLog(), comment
+                                parsing (parseComments, filterIgnored, expandRanges)
+    distill.ts                  Feature request synthesis from sandbox artifacts
+    retro.ts                    Learning extraction from completed sessions
+    audit.ts                    Audit log generation from audit-raw.jsonl
+    sandbox-guard.ts            TypeScript guard hook (Windows compatibility)
+
+  connectors/                 External integrations
+    ado-pull-request/
+      create.ts                 Branch push, PR description assembly, az repos pr create
+    ado-work-item/
+      fetch.ts                  Work item fetch via az boards work-item show
+
+  metrics/                    Session tracking and cost analysis
+    session-map.ts              Composer-to-Claude session ID mapping
+                                (stored in ~/claude-skill-tools/session-maps/)
+    session-metrics.ts          JSONL log parsing: token usage, cost, tool call
+                                breakdowns; HTML/text/JSON report generation
+    uuid.ts                     Deterministic session ID generation
+
+  session-explorer/           Single-session analysis and browsing
+    index.ts                    CLI entry: two modes (report + server)
+    parser.ts                   JSONL session log parser
+    summary.ts                  Metric computation from parsed sessions
+    report.ts                   HTML report generation
+    server.ts                   Local HTTP server for interactive browsing
+
+  shared/                     Common utilities
+    paths.ts                    PACKAGE_ROOT, resolveRepoRoot(), state dir helpers
+    config.ts                   Config resolution: repo-level override at
+                                .claude/.skill-state/config.json, falling back to
+                                ~/claude-skill-tools/config.json
+    ui.ts                       ANSI formatting: colors, banners, error blocks,
+                                die(). Respects NO_COLOR env var.
+    utils.ts                    promptUser(), nowISO(), sleep(), copyDirIfExists()
+
+tests/
+  tier1/                      Pure function tests (no I/O, no mocking)
+  tier2/                      Filesystem tests with temp dirs and .git/ setup
+  helpers/
+    fixtures.ts                 createTempDir, removeTempDir, writeJson, writeFile
+```
+
+---
+
+## Key Design Decisions
+
+### Zero runtime dependencies
+
+Every dependency is a maintenance burden, a supply chain risk, and a layer of indirection between you and the behavior of the tool. claude-skill-tools uses only Node built-ins:
+
+- `child_process.spawnSync` and `child_process.spawn` for shell commands
+- `fs` and `path` for file operations
+- `http` for the session-explorer server
+- `readline` for interactive prompts
+
+This makes the tool fully auditable. You can read every line of code that executes.
+
+### Manual argument parsing
+
+CLI arguments are parsed with switch/case blocks in each tool's main function. There is no yargs, no commander, no minimist. This keeps the argument handling co-located with the command dispatch and avoids the abstraction overhead of a CLI framework for what are relatively simple argument structures.
+
+### JSON state on disk
+
+All persistent state is stored as JSON files. There is no database, no SQLite, no key-value store.
+
+- **Composer sessions**: `<repo>/.claude/.skill-state/composer/<sessionId>.json`
+- **Sandbox state**: `<repo>/.claude/.skill-state/sandbox/<slug>.json`
+- **Session maps**: `~/claude-skill-tools/session-maps/`
+- **Configuration**: `~/claude-skill-tools/config.json` (user-level), `<repo>/.claude/.skill-state/config.json` (repo-level override)
+
+JSON files are human-readable, diffable, and trivially debuggable. When something goes wrong, you can open the state file and see exactly what the tool thinks is happening.
+
+### Template variables
+
+Step commands in compositions use `{placeholder}` syntax that is resolved at runtime via `resolveTemplate()`. For example, a step command might be:
+
+```
+claude -p "Review the code in {worktree}" --system-prompt prompts/reviewer.md
+```
+
+The template engine replaces `{worktree}` with the actual worktree path from the session state. This keeps composition definitions declarative and readable.
+
+### ESM-only with .js extensions
+
+The project is an ESM package (`"type": "module"` in package.json) targeting Node.js >= 18. All internal imports use `.js` extensions per NodeNext module resolution rules. Vitest resolves these to the corresponding `.ts` files during testing.
+
+### TypeScript strict mode
+
+All strict checks are enabled. There are no `any` types. This catches a class of bugs at compile time that would otherwise surface as runtime errors in a tool that orchestrates long-running agent sessions.
+
+---
+
+## Data Flow
+
+A typical composer run follows this path:
+
+```
+CLI invocation (src/bin/composer.ts)
+  |
+  v
+Arg parsing (composer.ts main())
+  |
+  v
+Command dispatch (commands.ts cmdCompose())
+  |
+  v
+Session creation (state.ts) -- generates session ID, persists initial state
+  |
+  v
+Composition lookup (config/compositions.ts) -- resolves named composition
+  |
+  v
+Step loop (execution.ts runComposition())
+  |
+  +---> For each step:
+  |       |
+  |       v
+  |     Template resolution -- replace {placeholders} with runtime values
+  |       |
+  |       v
+  |     Shell execution -- spawnSync or spawn (tmux: split pane + poll)
+  |       |
+  |       v
+  |     State capture -- branch name, worktree path, exit code
+  |       |
+  |       v
+  |     Interactive prompt -- n(ext), s(kip), p(rev), q(uit)
+  |       |
+  |       v
+  |     State persistence -- save updated SessionState to JSON
+  |
+  v
+Composition complete
+```
+
+For sandbox ralph iterations, the flow is:
+
+```
+sandbox ralph (sandbox.ts)
+  |
+  v
+Developer agent (headless via claude -p)
+  |-- Real-time progress display (runAgentWithTimer)
+  |-- Auto-commits changes on completion
+  |
+  v
+Reviewer agent (headless via claude -p)
+  |-- Writes comments.md with findings
+  |
+  v
+User decision point
+  |-- Accept: done
+  |-- Ignore specific comments: filter and re-iterate
+  |-- Re-iterate: developer runs again with reviewer feedback
+  |
+  v
+Ralph log updated (ralph-log.md) -- tracks all iterations
+```
+
+---
+
+## State Storage
+
+State is split between two locations based on scope and lifetime:
+
+### Repo-level state (`.claude/.skill-state/`)
+
+Lives inside the repository, under a path that is typically gitignored. Contains state that is specific to a particular repo's active work:
+
+| Directory | Contents |
+|---|---|
+| `composer/<sessionId>.json` | Composer session state: current step, template vars, timestamps |
+| `sandbox/<slug>.json` | Sandbox state: worktree path, branch name, ralph iteration count |
+| `config.json` | Repo-level config overrides (ADO org, field mappings) |
+
+### User-level state (`~/claude-skill-tools/`)
+
+Lives in the user's home directory. Contains state that spans repositories or persists beyond a single repo's lifecycle:
+
+| Directory | Contents |
+|---|---|
+| `session-maps/` | Mappings from composer session IDs to Claude CLI session IDs |
+| `parsed-cache/` | Cached parsed session data for session-explorer |
+| `config.json` | User-level default configuration |
+
+### Config resolution
+
+Configuration uses a two-level merge strategy. The repo-level config at `.claude/.skill-state/config.json` is merged over the user-level config at `~/claude-skill-tools/config.json` on a per-field basis. This allows repository-specific overrides (such as a different ADO organization) without duplicating the entire config.
+
+---
+
+## Testing Strategy
+
+Tests use **Vitest** and are organized into two tiers based on their I/O requirements:
+
+### Tier 1: Pure function tests (`tests/tier1/`)
+
+These test pure logic with no filesystem access, no mocking, and no side effects. They are fast, deterministic, and have the highest return on investment. Examples include slug generation, template resolution, and comment parsing.
+
+### Tier 2: Filesystem tests (`tests/tier2/`)
+
+These test behavior that requires a real filesystem. Each test:
+
+1. Creates a temporary directory
+2. Initializes a `.git/` directory inside it
+3. Changes the working directory to the temp dir
+4. Calls `_resetRepoRootCache()` to clear the cached repo root
+5. Runs the test
+6. Restores the original working directory in `afterAll`
+
+Shared fixtures (`tests/helpers/fixtures.ts`) provide `createTempDir`, `removeTempDir`, `writeJson`, and `writeFile` utilities.
+
+### Coverage
+
+Run `npm run test:coverage` for a v8 coverage report. There is no configured coverage threshold, but the goal is comprehensive tier 1 coverage for all pure logic and targeted tier 2 coverage for filesystem-dependent behavior.
+
+### No linter
+
+There is no ESLint or Prettier configuration. TypeScript strict mode serves as the primary static analysis tool. Code style consistency is maintained by convention rather than enforcement tooling.

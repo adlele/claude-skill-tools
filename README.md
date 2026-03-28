@@ -1,6 +1,6 @@
 # claude-skill-tools
 
-Composer and sandbox developer tools for Claude Code workflows. Orchestrate multi-role AI agent compositions using isolated git worktrees.
+A collection of AI development tools, primarily built with Claude Code CLI in mind.
 
 ## Features
 

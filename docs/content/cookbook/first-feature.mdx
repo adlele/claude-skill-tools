@@ -1,0 +1,127 @@
+---
+title: Your First Feature
+---
+
+# Your First Feature
+
+This recipe walks through a full composition end-to-end -- from a one-line feature request to a draft pull request with all supporting artifacts.
+
+## 1. Write a feature request
+
+You have three ways to provide context:
+
+```bash
+# Inline context (short descriptions)
+composer compose full --context "Add user avatar upload to the profile page"
+
+# From a file (longer, pre-written feature requests)
+composer compose full --context-file ./feature-request.md
+
+# From an Azure DevOps work item
+composer compose full --ado 12345
+```
+
+Pick whichever fits your situation. For this walkthrough, we will use inline context.
+
+## 2. Start the composition
+
+```bash
+composer compose full --context "Add user avatar upload to the profile page"
+```
+
+The composer shows you the full step sequence and drops you into an interactive prompt. At each step you can:
+
+- **n** -- run the next step
+- **s** -- skip this step
+- **p** -- go back to the previous step
+- **q** -- quit (you can resume later)
+
+## 3. Step 1 (auto): Sandbox creation
+
+The composer creates an isolated git worktree with its own branch. This happens automatically -- no input needed. You will see output like:
+
+```
+Sandbox created: avatar-upload
+Branch: users/you/avatar-upload
+Worktree: /path/to/repo/.worktrees/avatar-upload
+```
+
+All work from here on happens inside this worktree, keeping your main branch clean.
+
+## 4. Step 2: Analyst session
+
+The analyst agent interviews you about the feature. It asks clarifying questions -- scope, edge cases, acceptance criteria -- then produces **requirements.md** in the worktree.
+
+Take this step seriously. The quality of the requirements directly determines the quality of everything downstream. If the analyst misses something, tell it. If it over-scopes, push back.
+
+After the session ends, open `requirements.md` and verify it captures your intent before moving on.
+
+## 5. Step 3: Architect session
+
+The architect reads the feature request and requirements, then designs the implementation. It produces **spec.md** with:
+
+- Component breakdown
+- File-level changes
+- Data flow
+- Dependencies and trade-offs
+
+Review the spec for anything that feels wrong -- incorrect assumptions about the codebase, over-engineering, or missing constraints. This is your last chance to course-correct before code is written.
+
+## 6. Auto-distill
+
+After the architect finishes, the composer automatically distills all three artifacts (feature request, requirements, spec) into **improved-feature-request.md**. This merged document eliminates ambiguity so the developer gets a single, clear source of truth.
+
+You do not need to do anything here -- it runs automatically between the architect and developer steps.
+
+## 7. Step 4: Ralph loop
+
+This is where code gets written. The ralph loop runs two agents in alternation:
+
+1. **Developer** -- reads the improved feature request and implements the changes, then commits
+2. **Reviewer** -- reads the spec and reviews the diff, writes comments
+
+After each review, the composer shows you a summary of the reviewer's comments. You can:
+
+- Let the developer fix them (the default -- just press **n** or **c**)
+- Ignore specific comments if they are nitpicks or false positives
+
+The loop continues until the reviewer has no comments, the maximum iteration count is reached, or you stop it manually.
+
+## 8. Step 5: PR dry-run
+
+The composer previews what the pull request will look like -- title, description, and the list of changed files. Review this before creating the real PR.
+
+## 9. Step 6: Create draft PR
+
+The composer pushes the branch and creates a draft pull request. The PR description is assembled from your sandbox artifacts (feature request, spec, tasks, ralph log).
+
+## 10. Review the artifacts
+
+All artifacts live in the worktree directory. The key files to review:
+
+| File | Purpose |
+|:-----|:--------|
+| `requirements.md` | What the analyst captured from your interview |
+| `spec.md` | The architect's design |
+| `improved-feature-request.md` | Distilled, zero-ambiguity feature request |
+| `comments.md` | The reviewer's latest comments |
+| `ralph-log.md` | Full history of developer/reviewer iterations |
+
+## 11. Clean up
+
+When you are done with the sandbox (PR merged, or you want to start over):
+
+```bash
+composer clean <session-id>
+```
+
+This removes the worktree and local branch. Session maps are preserved so you can still generate reports for the session later.
+
+---
+
+## Tips
+
+- **Pause and resume.** Press **q** at any step to quit. Resume later with `composer resume`. Your session state is saved automatically.
+- **Skip steps.** Press **s** to skip a step you do not need (for example, skip the analyst if you already have detailed requirements).
+- **Go back.** Press **p** to re-run a previous step if you realize something was missed.
+- **Check status.** Run `composer list` to see all your active sessions and their current step.

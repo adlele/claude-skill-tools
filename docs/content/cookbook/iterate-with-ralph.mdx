@@ -1,0 +1,101 @@
+---
+title: Iterate with Ralph
+---
+
+# Iterate with Ralph
+
+The `ralph-only` composition skips the analyst and architect steps and goes straight to the developer/reviewer loop. Use it when you already know exactly what you want built.
+
+## When to use ralph-only
+
+- **Well-defined tasks** -- you can describe the change precisely in a few sentences
+- **Re-runs with distilled feature requests** -- you already ran a full composition and have an improved-feature-request.md
+- **Tasks that do not need planning** -- bug fixes, refactors, adding tests, small features with obvious implementations
+
+If the task is ambiguous or large enough to benefit from an analyst interview and architectural design, use `composer compose full` instead.
+
+## Steps
+
+### 1. Start the composition
+
+```bash
+composer compose ralph-only \
+  --context "Add input validation to the signup form: email format, password strength (8+ chars, 1 uppercase, 1 number), display inline errors"
+```
+
+Be specific. The more detail you put in the context, the fewer ralph iterations you will need.
+
+### 2. Sandbox creates automatically
+
+The first step creates an isolated worktree and branch, just like the full composition. No action needed.
+
+### 3. Ralph loop starts
+
+The developer agent reads your context and implements the changes. When it finishes and commits, the reviewer agent takes over and writes a review.
+
+### 4. Handle review results
+
+After each review cycle, you see a summary of the reviewer's comments. You have three options:
+
+| Key | Action | When to use |
+|:----|:-------|:------------|
+| `c` | Continue -- developer fixes all comments | The comments are valid and should be addressed |
+| `i 1 3` | Ignore comments 1 and 3 | Those comments are nitpicks or false positives |
+| `i 1-4` | Ignore comments 1 through 4 | A range of comments you want to skip |
+| `s` | Stop the loop | The code is good enough, or you want to take over manually |
+
+Ignored comments are tracked in the ralph log so the developer does not try to fix them in the next iteration.
+
+### 5. Loop exits
+
+The loop ends when any of these conditions is met:
+
+- The reviewer finds no issues (clean review)
+- The maximum iteration count is reached
+- You press **s** to stop
+
+After the loop exits, you can proceed to the PR steps or review the worktree manually.
+
+## Tuning the ralph loop
+
+### Iteration count
+
+```bash
+# Fewer iterations for simple tasks (default: 5 in composer, 10 in sandbox)
+composer compose ralph-only --max-iterations 3 --context "Fix the off-by-one error in pagination"
+```
+
+Lower iteration counts save time and cost. If the task is simple enough that three passes should suffice, cap it.
+
+### Model selection
+
+```bash
+# Use sonnet for cheaper iterations
+composer compose ralph-only --model sonnet --context "Add unit tests for the UserService class"
+```
+
+Sonnet is significantly cheaper than opus and handles straightforward implementation tasks well. Use opus (the default) when the task requires deeper reasoning or complex architectural decisions.
+
+### Solo developer mode
+
+```bash
+# No sub-agent delegation -- single developer works alone
+composer compose ralph-only --no-agents --context "Rename the Logger class to AppLogger across the codebase"
+```
+
+By default, the developer agent can spawn sub-agents to parallelize work. The `--no-agents` flag disables this, which is useful for:
+
+- Simple tasks where parallelism adds overhead without benefit
+- Reducing cost on straightforward changes
+- Debugging when you want a simpler execution trace
+
+## Example: quick bug fix
+
+```bash
+composer compose ralph-only \
+  --max-iterations 2 \
+  --model sonnet \
+  --context "Fix bug: the /api/users endpoint returns 500 when the email query param contains a '+' character. The issue is in src/routes/users.ts -- the email is not being URL-decoded before the database query."
+```
+
+This runs a tight loop: two iterations max, cheaper model, precise bug description. The developer fixes the bug, the reviewer verifies the fix, and you are done.

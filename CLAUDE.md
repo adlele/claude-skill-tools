@@ -35,7 +35,7 @@ The project is an ESM package (`"type": "module"`) targeting Node.js >= 18. All 
 
 ## Architecture
 
-Three CLI tools (`composer`, `sandbox`, `session-explorer`) that orchestrate multi-role AI agent workflows using Claude Code CLI and isolated git worktrees.
+A collection of AI development tools, primarily built with Claude Code CLI in mind. Currently includes three CLI tools (`composer`, `sandbox`, `session-explorer`).
 
 ### Entry Points
 

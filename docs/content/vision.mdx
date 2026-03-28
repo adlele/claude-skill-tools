@@ -1,0 +1,117 @@
+---
+title: Vision & Philosophy
+---
+
+# Vision & Philosophy
+
+## The Problem
+
+AI coding assistants are extraordinarily powerful, but they struggle with large, ambiguous tasks. When a single agent is responsible for everything -- understanding requirements, designing the solution, writing the code, and reviewing the result -- the outcome is predictable: scope creep, inconsistency, and zero separation of concerns.
+
+The root cause is not that AI is bad at coding. It is that **unbounded autonomy without structure produces unreliable results**. The same principle applies to human teams: you would never ask one person to be the analyst, architect, developer, and reviewer on a critical feature with no checkpoints.
+
+claude-skill-tools exists to bring the structure that makes AI coding assistants reliable at scale.
+
+---
+
+## Levels of AI-Assisted Development
+
+Understanding why this tool exists requires understanding the progression of how developers work with AI, and where each level breaks down.
+
+### Level 1: Direct Asks
+
+One-shot prompts. You describe what you want, the AI writes the code.
+
+This works well for small, well-defined tasks: "write a function that parses this date format," "add a retry wrapper around this HTTP call."
+
+**Where it breaks down:** AI defaults to "best practice" over the simplest solution. It adds abstractions you did not ask for. When something goes wrong mid-generation, it does not stop to ask -- it plows ahead with assumptions. For anything beyond a single function, the output diverges from what you actually needed.
+
+### Level 2: Plan Mode
+
+Read-only planning before coding. The AI analyzes the codebase, surfaces assumptions, and proposes an approach. You review and approve before any code is written.
+
+This is a significant improvement. It catches misunderstandings early and gives you a chance to redirect.
+
+**Where it breaks down:** An approved plan is a contract. If you do not push back on scope, the AI treats everything in the plan as green-lit. A plan that says "refactor the auth module, add tests, and update the docs" means the AI will do all three, even if you only cared about the refactor. The discipline of reading plans critically is on you.
+
+### Level 3: Constrained Agents
+
+Define a role, rules, and methodology via system prompts. The agent operates within those boundaries. These prompts are reusable across sessions, creating consistency.
+
+This is where AI starts to feel like a reliable team member. A "developer" agent that follows your coding conventions and a "reviewer" agent that checks for specific anti-patterns produce better results than an unconstrained agent.
+
+**Where it breaks down:** Large, cross-cutting work. One agent making trade-offs across eight files with no reviewer is still one agent doing everything. The system prompt constrains behavior, but it cannot replace the feedback loop of multiple perspectives.
+
+### Level 4: Agent Orchestration
+
+Chain specialized agents into a workflow. An analyst clarifies the requirement. An architect designs the solution. A developer implements it. A reviewer checks the result. Each step has a dedicated role with a dedicated system prompt and a bounded responsibility.
+
+**This is what claude-skill-tools provides.**
+
+But orchestration is not a silver bullet. It can amplify ambiguity: if the first artifact (the analyst's output) is vague, every downstream role inherits the confusion. The architect designs around ambiguity. The developer implements the ambiguous design. The reviewer cannot distinguish intentional decisions from misunderstandings.
+
+The chain is only as good as its first artifact.
+
+---
+
+## Design Principles
+
+### 1. Specialized roles over generalist agents
+
+Each role has a bounded responsibility defined by its system prompt. The analyst does not write code. The developer does not design architecture. The reviewer does not implement fixes. This separation prevents the drift that happens when a single agent tries to do everything.
+
+### 2. System prompts are rules, not suggestions
+
+A system prompt is not a polite request. It is an enforcement mechanism. When the developer prompt says "do not modify files outside the sandbox directory," that is a hard constraint backed by a guard hook, not a guideline the agent might choose to follow. Structure your prompts as rules, and back them with tooling where possible.
+
+### 3. The chain is only as good as its first artifact
+
+If the analyst produces a vague feature request, every downstream role inherits the vagueness. Validate early or fail expensively. This is why the distill command exists: it synthesizes improved feature requests from implementation artifacts, creating a feedback loop that tightens the input over time.
+
+### 4. Zero-intervention flywheel
+
+The distill workflow enables self-improving feature requests. After a sandbox run produces requirements, a spec, and an implementation, the distill command can synthesize what was learned back into a better feature request. Over multiple iterations, the quality of the input artifact improves without manual rewriting.
+
+### 5. Isolation by default
+
+Every sandbox session runs in its own git worktree. Agents cannot affect the main repository, each other's work, or shared state. This is not just a safety measure -- it enables parallel work and fearless experimentation.
+
+### 6. Zero runtime dependencies
+
+The entire tool chain has zero runtime dependencies. Only TypeScript and @types/node exist as dev dependencies. No CLI frameworks, no HTTP libraries, no ORMs. This keeps the tool lean, transparent, and auditable. You can read every line of code that runs on your machine.
+
+---
+
+## When NOT to Use Composer
+
+Composer adds value when a task is large enough to benefit from multiple perspectives and structured handoffs. It adds overhead when the task is small.
+
+**If the task fits in one commit and one mental context, Composer is overkill.**
+
+There is a real cost floor to a full composition:
+
+- Analyst role: ~15 minutes
+- Architect role: ~20 minutes
+- 3 ralph (developer/reviewer) iterations: ~45 minutes each
+
+That totals **3+ hours of wall-clock time and approximately $12 in API tokens** for a full run.
+
+For a bug fix that touches two files, use Level 2 or Level 3 directly. Composer is for the kind of work where you would normally create a design document, hold a review meeting, and plan a multi-day implementation.
+
+---
+
+## Guiding Insight
+
+> AI is a force multiplier for your existing dev process, not a replacement. The more structure and guardrails you put around it, the more effective it becomes.
+
+The instinct to "just let the AI handle it" is the instinct that produces the worst results. The developers who get the most out of AI are the ones who treat it like a powerful but literal-minded team member: clear instructions, bounded scope, explicit checkpoints, and honest review.
+
+---
+
+## Key Takeaways
+
+1. **Start with plan mode** -- then read the plan like a contract. Push back on scope before approving.
+2. **System prompts are rules, not suggestions** -- write them as constraints, not wishes. Back them with enforcement where possible.
+3. **Validate early artifacts** -- the analyst's output determines the quality of everything downstream. Stop and course-correct early.
+4. **Always understand what you are asking for** -- do not offload the thinking to AI. Offload the typing.
+5. **Specialized roles beat one agent doing everything** -- separation of concerns applies to AI workflows just as much as it applies to code.

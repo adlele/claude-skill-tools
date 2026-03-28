@@ -1,0 +1,204 @@
+---
+title: Composer
+---
+
+# Composer
+
+The composer orchestrates multi-step workflow compositions that chain together sandbox creation, AI role sessions, automated dev/review loops, and PR creation. It manages session state, supports pause/resume, and integrates with tmux for split-pane execution.
+
+```
+composer <command> [options]
+```
+
+## Commands
+
+| Command | Description |
+|:--------|:------------|
+| `composer list` | List available composition types with descriptions |
+| `composer compose <type> [opts]` | Start a new composition |
+| `composer resume <session-id>` | Resume a paused or in-progress session |
+| `composer sessions` | Show all sessions with status, step, and branch |
+| `composer clean <target>` | Remove session state (`<id>`, `--all`, `--completed`, `--stale`) |
+| `composer report [session-id]` | Generate metrics report for a session |
+| `composer distill [session-id]` | Distill improved feature request from session artifacts |
+| `composer size [session-id]` | Show sandbox disk usage for a session |
+| `composer retro [session-id]` | Extract learnings from review comments |
+
+Running `composer` with no arguments displays a welcome screen with active session counts and quick-start examples.
+
+---
+
+## Composition Types
+
+Each composition defines a sequence of steps. The composer walks you through them one at a time with an interactive prompt.
+
+| Type | Pipeline | Steps |
+|:-----|:---------|------:|
+| `full` | sandbox -> analyst -> architect -> ralph (dev/review loop) -> PR | 6 |
+| `ralph-only` | sandbox -> ralph (automated dev/review) -> PR | 4 |
+| `manual` | sandbox -> analyst -> architect -> developer -> reviewer -> PR | 7 |
+| `role` | sandbox -> single role session -> PR (requires `--role`) | 4 |
+| `headless` | sandbox -> background developer -> status check -> PR | 5 |
+
+**full** is the most thorough pipeline: an analyst produces `requirements.md`, an architect produces `spec.md`, and then the ralph loop handles iterative development and code review until the reviewer is satisfied (or max iterations are reached).
+
+**ralph-only** skips the analyst and architect phases and goes straight to automated dev/review. This is the fastest path when you already have a clear feature request.
+
+**manual** is like full but replaces the automated ralph loop with separate interactive developer and reviewer sessions, giving you full control over each role.
+
+**role** runs a single role of your choosing (analyst, architect, developer, reviewer, or any custom role) in an interactive session.
+
+**headless** launches the developer agent in the background and provides a status-check step so you can monitor progress without an interactive terminal.
+
+---
+
+## Compose Options
+
+```
+composer compose <type> [options]
+
+--context "..."          Inline context string (seeded as feature-request.md)
+--context-file <path>    Read context from a file
+--ado <work-item-id>     Fetch context from Azure DevOps work item
+--model <model>          Model to use (default: opus)
+--max-iterations <n>     Max dev/review iterations (default: 5)
+--role <name>            Role to run (required for 'role' composition)
+--name <session-name>    Custom session name (auto-deduped if taken)
+--base <branch>          Base branch for sandbox worktree (default: master)
+--skip-sandbox           Skip sandbox creation, run on current branch
+```
+
+You must provide at least one context source (`--context`, `--context-file`, or `--ado`). The context is written to `feature-request.md` in the sandbox worktree, where each role reads it as its starting point.
+
+When `--ado` is used, the work item is fetched via `az boards work-item show` and converted to markdown context automatically.
+
+If `--name` is provided and a session with that name already exists, a numeric suffix is appended (e.g., `my-feature` becomes `my-feature1`).
+
+### Examples
+
+```bash
+# Full workflow from an ADO work item
+composer compose full --ado 12345
+
+# Quick automated dev/review with inline context
+composer compose ralph-only --context "Fix the login button"
+
+# Single architect session
+composer compose role --role architect --context "Design caching layer"
+
+# Custom session name and base branch
+composer compose full --ado 12345 --name my-feature --base main
+
+# Resume a paused session (use short ID suffix)
+composer resume a1b2
+```
+
+---
+
+## Report Options
+
+Generate a metrics report for a composer session. Reports aggregate token usage, cost, and tool call breakdowns across all Claude sessions within a composition.
+
+```
+composer report [session-id] [options]
+
+[session-id]      Session to report on (omit for interactive picker)
+--html            HTML report (default)
+--text            Plain text report
+--json            JSON data export
+--out <path>      Custom output file path
+```
+
+If no session ID is given, the command lists all tracked sessions and prompts you to select one.
+
+---
+
+## Distill Options
+
+Distill an improved, detailed feature request from sandbox artifacts (requirements.md, spec.md) or from the actual code changes.
+
+```
+composer distill [session-id] [options]
+
+[session-id]      Session to distill (omit for latest)
+--model <model>   Model to use (default: sonnet)
+--from-impl       Generate from actual implementation diff instead of artifacts
+--base <branch>   Base branch for diff comparison (used with --from-impl)
+```
+
+The default mode reads the analyst and architect artifacts from the sandbox and synthesizes a refined feature request. With `--from-impl`, it instead examines the actual code diff to produce a feature request that reflects what was really built.
+
+### Examples
+
+```bash
+# Distill the latest session's artifacts
+composer distill
+
+# Distill from actual code changes
+composer distill a1b2 --from-impl
+
+# Use a specific model
+composer distill --model opus
+```
+
+---
+
+## Retro Options
+
+Extract learnings from review iterations in a completed ralph loop. Parses reviewer comments across all iterations and synthesizes patterns, recurring issues, and actionable takeaways.
+
+```
+composer retro [session-id] [options]
+
+[session-id]      Session to analyze (omit for latest)
+--model <model>   Model to use (default: sonnet)
+```
+
+This delegates to `sandbox retro` under the hood, targeting the sandbox associated with the selected composer session.
+
+---
+
+## Step Navigation
+
+When a composition is running, each step presents an interactive prompt before execution:
+
+| Key | Action |
+|:----|:-------|
+| `n` or Enter | Run the current step |
+| `s` | Skip the current step |
+| `p` | Go back to the previous step |
+| `q` | Quit (session is saved and can be resumed) |
+| `?` | Show current session status |
+| `a` | Toggle auto-advance for ralph steps |
+
+After each step completes, there is a short auto-advance countdown before the next step begins. Press any key during the countdown to pause and return to the interactive prompt.
+
+### Tmux Integration
+
+When running inside a tmux session, composer steps execute in a split pane. The main pane shows the composition progress while the step runs in an adjacent pane. A poll loop watches for step completion and automatically advances when done. This keeps the orchestration UI visible alongside the running agent.
+
+### Session Persistence
+
+Session state is saved as JSON in `<repo>/.claude/.skill-state/composer/`. If you quit mid-composition with `q`, or if the process is interrupted, resume with:
+
+```bash
+composer resume <session-id>
+```
+
+The session ID can be a short suffix (last 4 characters) -- it will be resolved to the full ID. Run `composer sessions` to see all sessions with their current status and step.
+
+### Cleaning Up
+
+```bash
+# Remove a specific session
+composer clean a1b2
+
+# Remove all completed sessions
+composer clean --completed
+
+# Remove stale sessions
+composer clean --stale
+
+# Remove all sessions
+composer clean --all
+```

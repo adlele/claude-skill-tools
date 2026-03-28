@@ -1,0 +1,252 @@
+---
+title: Contributing
+---
+
+# Contributing
+
+## Development Setup
+
+```bash
+git clone <repo-url>
+cd claude-skill-tools
+npm install
+npm run build
+```
+
+The build step runs the TypeScript compiler and copies asset directories (`prompts/` and `hooks/`) into `dist/`. You need Node.js >= 18.
+
+There is no linter configured. TypeScript strict mode is on and serves as the primary static analysis tool. The project is an ESM package (`"type": "module"` in package.json) with NodeNext module resolution, so all internal imports use `.js` extensions.
+
+---
+
+## Running Tests
+
+```bash
+npm test               # Single run (vitest run)
+npm run test:watch     # Watch mode (re-runs on file changes)
+npm run test:coverage  # Single run with v8 coverage report
+```
+
+### Test tiers
+
+Tests live in `tests/` and are split into two tiers:
+
+**Tier 1 (`tests/tier1/`)** -- Pure function tests. No filesystem access, no mocking, no side effects. These are fast and deterministic. If you are adding a utility function or a parser, write a tier 1 test.
+
+**Tier 2 (`tests/tier2/`)** -- Filesystem tests. Each test creates a temporary directory with a `.git/` directory, changes the working directory, and calls `_resetRepoRootCache()` in `beforeEach` to ensure path resolution picks up the temp dir. The original working directory is restored in `afterAll`. Use tier 2 when you need to test behavior that reads or writes files.
+
+### Running specific tests
+
+```bash
+# Single file
+npx vitest run tests/tier1/slugify.test.ts
+
+# All tests in a tier
+npx vitest run tests/tier1
+
+# By test name pattern
+npx vitest run -t "slugifyContext"
+```
+
+### Test conventions
+
+- Import paths use `.js` extensions (Vitest resolves them to `.ts`)
+- Intercept `process.exit` with `vi.spyOn(process, "exit").mockImplementation(...)`
+- Suppress console noise with `vi.spyOn(console, "log").mockImplementation(() => {})`
+- Shared fixtures are in `tests/helpers/fixtures.ts` (`createTempDir`, `removeTempDir`, `writeJson`, `writeFile`)
+
+---
+
+## Code Conventions
+
+These conventions apply to all code in the repository:
+
+### Argument parsing
+
+CLI arguments are parsed manually with switch/case blocks. There is no CLI framework (no yargs, no commander). Keep argument handling co-located with command dispatch.
+
+### Dependencies
+
+There are zero runtime dependencies. Only `typescript` and `@types/node` exist as dev dependencies. If you need HTTP, use `node:http`. If you need to parse JSON, use `JSON.parse`. If you need to run a shell command, use `node:child_process`.
+
+Do not add runtime dependencies without a compelling justification.
+
+### Imports
+
+All internal imports use `.js` extensions per NodeNext module resolution:
+
+```typescript
+import { resolveRepoRoot } from "../shared/paths.js";
+import { die, banner } from "../shared/ui.js";
+```
+
+### State management
+
+All persistent state is stored as JSON files on disk. Composer state goes in `.claude/.skill-state/composer/`, sandbox state in `.claude/.skill-state/sandbox/`. User-level durable data (session maps, config) goes in `~/claude-skill-tools/`.
+
+Never introduce a database, an ORM, or a key-value store.
+
+### Error handling
+
+Use `die()` from `shared/ui.ts` for fatal errors. It prints a formatted error message with optional suggestion lines and calls `process.exit(1)`:
+
+```typescript
+die("Sandbox not found", [`Run 'sandbox create' first`, `Check 'sandbox list' for existing sandboxes`]);
+```
+
+### Shell commands
+
+Use `spawnSync` for synchronous execution and `spawn` for background processes. Always check exit codes. Never use `exec` or `execSync` (they run through a shell and have buffer limits).
+
+### Types
+
+No `any` types. TypeScript strict mode is enforced. Define explicit interfaces for state objects, configuration, and function parameters.
+
+### Target runtime
+
+Node.js >= 18. Do not use APIs that require Node 20+ unless there is no alternative.
+
+---
+
+## Adding a New Composition Type
+
+Compositions are defined in `src/composer/config/compositions.ts`. A composition is a named sequence of steps that the composer executes in order.
+
+### 1. Define the composition
+
+Create a `Composition` object with:
+
+- **name**: Display name for the composition
+- **description**: One-line description shown in help text
+- **steps**: Array of `Step` objects
+
+Each `Step` has:
+
+- **label**: Human-readable step name (shown in the step loop UI)
+- **cmd**: Template string with `{placeholder}` variables resolved at runtime
+- **type**: A `StepType` value (`sandbox-create`, `claude-interactive`, `ralph`, `sandbox-start`, `status-check`, `pr-dry-run`, `ado-pr-create`)
+- **autoAdvance** (optional): If true, the step loop advances automatically without prompting
+
+### 2. Register the composition
+
+Add the composition to the `COMPOSITIONS` map, keyed by a short identifier:
+
+```typescript
+COMPOSITIONS.set("my-workflow", {
+  name: "My Custom Workflow",
+  description: "Does something useful",
+  steps: [
+    { label: "Create sandbox", cmd: "sandbox create {slug}", type: "sandbox-create" },
+    { label: "Run developer", cmd: "sandbox start --role developer", type: "sandbox-start" },
+    // ... more steps
+  ],
+});
+```
+
+### 3. Test it
+
+Run the composition interactively to verify each step resolves and executes correctly:
+
+```bash
+composer compose my-workflow --slug test-run
+```
+
+---
+
+## Adding a New Role Prompt
+
+Role prompts are markdown files in the `prompts/` directory. Each prompt defines a specialized agent role used by sandbox sessions and composer steps.
+
+### Structure
+
+Follow the established pattern:
+
+1. **Role description**: What this agent is and what it does
+2. **Process steps**: Numbered sequence of actions the agent should take
+3. **Output format**: What files or artifacts the agent produces
+4. **Rules and constraints**: Hard boundaries on the agent's behavior
+
+### Example
+
+```markdown
+# Role: Tester
+
+You are a testing specialist. Your job is to write comprehensive tests for the implementation in this sandbox.
+
+## Process
+1. Read the feature request and spec
+2. Review the implementation code
+3. Write tests covering happy path, edge cases, and error conditions
+
+## Output
+- Create test files in the appropriate tests/ directory
+- Follow the existing test conventions in the repo
+
+## Rules
+- Do not modify implementation code
+- Do not modify files outside the sandbox directory
+- Write deterministic tests (no timing-dependent assertions)
+```
+
+### Test the prompt
+
+```bash
+sandbox start --role <name> --context "test"
+```
+
+Verify that the agent follows the prompt's rules and produces the expected output format.
+
+---
+
+## Adding a CLI Command
+
+### Entry points
+
+Each CLI tool has a thin entry point shim in `src/bin/` that re-exports the main module:
+
+- `src/bin/composer.ts` re-exports `src/composer/composer.ts`
+- `src/bin/sandbox.ts` re-exports `src/sandbox/sandbox.ts`
+- `src/bin/session-explorer.ts` re-exports `src/session-explorer/index.ts`
+
+### Command dispatch
+
+Commands are dispatched via switch/case in the tool's main function. To add a new command:
+
+1. **Add usage text**: Update the help/usage output in the main function to document the new command and its arguments.
+
+2. **Implement the handler**: Write the command function in the appropriate commands file (e.g., `src/composer/commands.ts` for composer commands, or directly in the sandbox/session-explorer main file for simpler commands).
+
+3. **Wire up dispatch**: Add a case to the switch/case block in the main function:
+
+```typescript
+case "my-command":
+  await cmdMyCommand(args);
+  break;
+```
+
+4. **Handle arguments**: Parse command-specific arguments from the remaining `args` array using manual parsing (indexOf, find, filter). Do not introduce an argument parsing library.
+
+---
+
+## Pull Request Process
+
+1. **Branch from main**: Create a feature branch with a descriptive name.
+2. **Keep commits focused**: Each commit should represent a single logical change. Write clear commit messages that explain what changed and why.
+3. **Run tests**: Ensure `npm test` passes before opening the PR.
+4. **Build check**: Ensure `npm run build` completes without errors.
+5. **Describe the change**: In the PR description, explain what the change does, why it is needed, and how it was tested. If the change affects the CLI interface, include example invocations.
+6. **Keep PRs reviewable**: Prefer smaller, focused PRs over large omnibus changes. If a feature requires significant work, break it into incremental PRs.
+
+---
+
+## Reporting Issues
+
+When reporting a bug or unexpected behavior, include:
+
+- **Version**: The output of `git rev-parse HEAD` or the installed version
+- **Operating system**: macOS, Linux, or Windows, and the version
+- **Node.js version**: The output of `node --version`
+- **Steps to reproduce**: The exact commands you ran, in order
+- **Expected behavior**: What you expected to happen
+- **Actual behavior**: What actually happened, including any error messages or stack traces
+- **Relevant state files**: If applicable, the contents of the session or sandbox state JSON file (redact any sensitive paths or tokens)

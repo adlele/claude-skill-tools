@@ -1,0 +1,152 @@
+---
+title: The Ralph Loop
+---
+
+# The Ralph Loop
+
+Ralph is the automated developer/reviewer iteration cycle at the heart of claude-skill-tools. It drives code from an initial implementation toward a clean review by repeatedly running a developer agent and a reviewer agent until the reviewer is satisfied or a limit is reached.
+
+## What is ralph?
+
+Ralph automates the back-and-forth that normally happens between a developer and a code reviewer. Instead of manually running the developer, reading comments, fixing issues, and asking for re-review, ralph handles the entire loop:
+
+```
+    Developer agent
+    (implement / fix)
+         │
+         ▼
+      Commit
+         │
+         ▼
+    Reviewer agent
+    (review code)
+         │
+         ▼
+     comments.md
+         │
+         ▼
+    Parse comments
+    ┌───────────────────────────────────┐
+    │ Must Fix  │ Should Fix │ Nitpicks │
+    └───────────────────────────────────┘
+         │
+         ▼
+    ┌──────────────┐
+    │ Clean review │──► DONE
+    └──────────────┘
+         │ (has comments)
+         ▼
+    ┌──────────────────┐
+    │ Max iterations?  │──► DONE
+    └──────────────────┘
+         │ (no)
+         ▼
+    User decides:
+      c = continue
+      i = ignore comments
+      s = stop
+         │
+         └──► Back to Developer agent
+```
+
+Each pass through the loop is one **iteration**. A typical ralph session takes 2-4 iterations to reach a clean review.
+
+## Artifacts
+
+Ralph produces and consumes several files in the sandbox:
+
+| Artifact                 | Description                                                                                                     |
+| :----------------------- | :-------------------------------------------------------------------------------------------------------------- |
+| **ralph-log.md**         | Cumulative history of all iterations -- what the developer changed, what the reviewer found, what was ignored.  |
+| **comments.md**          | The reviewer's output from the most recent iteration. Replaced each cycle.                                      |
+| **ignored-comments.txt** | Comments the user chose to ignore. Fed back to the developer so it does not re-address them.                    |
+| **audit-log.md**         | Human-readable summary of all tool calls made during the session, generated from audit-raw.jsonl on completion. |
+
+## Comment system
+
+The reviewer categorizes every finding into one of three severity levels:
+
+- **Must Fix** -- Blockers. Correctness bugs, security issues, spec violations. Ralph will not produce a clean review while Must Fix items remain.
+- **Should Fix** -- Important improvements. Not blockers, but the reviewer strongly recommends addressing them.
+- **Nitpicks** -- Style preferences, minor naming suggestions, formatting. Safe to ignore.
+
+When ralph presents comments after a review, you can:
+
+- Press **c** to continue -- the developer agent receives all un-ignored comments and attempts to fix them
+- Press **i** followed by comment numbers to ignore specific items: `i 1 3 5-7` (ranges are supported)
+- Press **s** to stop the loop and keep the code as-is
+
+Ignored comments are recorded in `ignored-comments.txt` and excluded from future iterations.
+
+> [!WARNING]
+> Be deliberate about ignoring Must Fix items. The reviewer flagged them as blockers for a reason. Ignoring them is supported but should be a conscious decision.
+
+## Agent mode vs solo
+
+Ralph supports two developer configurations:
+
+**Solo mode (default):** Uses `developer_single.md`. The developer agent works alone -- reads the spec, writes code, writes tests, verifies the build, and commits. Faster and cheaper.
+
+**Agent mode:** Uses `developer.md`. The developer agent acts as a team lead, spawning sub-agents for implementation, testing, and build verification. Higher quality but more expensive.
+
+```bash
+# Solo mode (default)
+sandbox ralph my-sandbox
+
+# Agent mode (explicit)
+sandbox ralph my-sandbox --no-agents=false
+
+# Force solo even when composition default is agent mode
+sandbox ralph my-sandbox --no-agents
+```
+
+## Headless ralph
+
+The `--headless` flag removes all interactive prompts. Ralph auto-continues through every iteration until it reaches a clean review or hits the max iteration limit:
+
+```bash
+sandbox ralph my-sandbox --headless --max-iterations 5
+```
+
+Headless mode is used automatically when ralph runs as a step inside a composition. It is also useful for background execution -- start it and come back to check results later.
+
+> [!WARNING]
+> Headless mode cannot ignore comments interactively. All reviewer comments are forwarded to the developer agent. Set `--max-iterations` to prevent runaway costs.
+
+## Starting from review
+
+The `--review` flag skips the first developer pass and jumps straight to the reviewer:
+
+```bash
+sandbox ralph my-sandbox --review
+```
+
+This is useful when:
+
+- You have already made changes manually and want the reviewer to evaluate them
+- You want to re-review after making hand-edits between iterations
+- You are resuming work and the code is already in a good state
+
+## Tmux integration
+
+When running inside tmux, ralph displays a real-time spinner with progress information:
+
+```
+dev 2/5  [████░░░░░░]  elapsed 1m32s
+```
+
+The display shows the current phase (dev or rev), the iteration count, and elapsed time. Press **a** during execution to toggle auto-advance mode, which skips the interactive prompt between iterations.
+
+## Cost considerations
+
+Each ralph iteration runs both a developer and a reviewer session, each consuming tokens. Costs scale linearly with iteration count and codebase size.
+
+Guidelines for managing costs:
+
+- Use `--max-iterations` to set a hard cap (default is 5)
+- Start with solo mode (`developer_single`) before switching to agent mode
+- Use [distill](distill) to produce clear feature requests -- clearer input means fewer iterations
+- Monitor token usage with `composer report` after completion
+
+> [!NOTE]
+> A typical 3-iteration ralph session with solo mode costs roughly the same as a single interactive Claude session of similar length. Agent mode approximately doubles the per-iteration cost.
