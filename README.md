@@ -2,6 +2,8 @@
 
 A collection of AI development tools, primarily built with Claude Code CLI in mind.
 
+[Documentation](https://adlele.github.io/claude-skill-tools/)
+
 ## Features
 
 - **Composer** — Orchestrate multi-step workflows (analyst, architect, developer, reviewer) with session state, auto-retry, and tmux integration
