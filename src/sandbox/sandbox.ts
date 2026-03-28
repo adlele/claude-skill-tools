@@ -42,6 +42,7 @@ import {
   generateImprovedFeatureRequest,
   printDistillBanner,
 } from "./distill.js";
+import { calculateSizes, formatSizeKB } from "./size.js";
 
 // ============================================================
 // COMMANDS
@@ -86,7 +87,7 @@ function sandboxStatus(state: SandboxState): string {
 
 // --- list ---
 
-function cmdList(): void {
+async function cmdList(): Promise<void> {
   const jsonFiles = getStateFiles();
 
   if (jsonFiles.length === 0) {
@@ -114,12 +115,24 @@ function cmdList(): void {
     return tb - ta;
   });
 
+  // Calculate sizes in parallel with progress
+  const sizeResults = await calculateSizes(
+    entries.map(e => ({
+      slug: e.state.slug,
+      branch: e.state.branch,
+      worktree: e.state.worktree,
+    })),
+  );
+  const sizeMap = new Map(sizeResults.map(r => [r.slug, r]));
+
   const idWidth = Math.max(6, ...entries.map(e => e.state.slug.length)) + 2;
+  const sizeWidth = 10;
   const createdWidth = 10;
   const header = [
     "ID".padEnd(idWidth),
     "MODE".padEnd(12),
     "STATUS".padEnd(10),
+    "SIZE".padEnd(sizeWidth),
     "CREATED".padEnd(createdWidth),
     "BRANCH",
   ].join(" ");
@@ -127,6 +140,7 @@ function cmdList(): void {
     "─".repeat(idWidth),
     "─".repeat(12),
     "─".repeat(10),
+    "─".repeat(sizeWidth),
     "─".repeat(createdWidth),
     "──────",
   ].join(" ");
@@ -139,10 +153,13 @@ function cmdList(): void {
     const ansiOverhead = badge.length - status.length;
     const created = state.created ? ui.relativeTime(state.created) : ui.dim("—");
     const createdOverhead = state.created ? 0 : created.length - "—".length;
+    const sr = sizeMap.get(state.slug);
+    const sizeStr = sr?.sizeHuman ?? "--";
     console.log([
       state.slug.padEnd(idWidth),
       state.mode.padEnd(12),
       badge.padEnd(10 + ansiOverhead),
+      sizeStr.padEnd(sizeWidth),
       created.padEnd(createdWidth + createdOverhead),
       state.branch,
     ].join(" "));
@@ -162,9 +179,120 @@ function cmdList(): void {
   }
 }
 
+// --- size ---
+
+async function cmdSize(args: string[]): Promise<void> {
+  let branch = "";
+  let id = "";
+  let i = 0;
+  while (i < args.length) {
+    switch (args[i]) {
+      case "--branch":
+        branch = args[++i] ?? "";
+        i++;
+        break;
+      case "--id":
+        id = args[++i] ?? "";
+        i++;
+        break;
+      default:
+        if (!args[i].startsWith("--")) {
+          id = args[i];
+          i++;
+        } else {
+          die(`Unknown option for size: ${args[i]}`, ["Run 'sandbox --help' for usage."]);
+        }
+        continue;
+    }
+  }
+
+  // Single-sandbox mode
+  if (id && !branch) {
+    branch = resolveBranchFromId(id);
+  }
+  if (branch) {
+    const state = readState(branch);
+    const results = await calculateSizes(
+      [{ slug: state.slug, branch: state.branch, worktree: state.worktree }],
+      false,
+    );
+    const r = results[0];
+    console.log(`${ui.bold(state.branch)}: ${r.sizeHuman}`);
+    return;
+  }
+
+  // All-sandboxes mode
+  const jsonFiles = getStateFiles();
+  if (jsonFiles.length === 0) {
+    console.log("No sandboxes found.");
+    return;
+  }
+
+  const entries: { state: SandboxState; status: string }[] = [];
+  for (const f of jsonFiles) {
+    let state: SandboxState;
+    try { state = JSON.parse(fs.readFileSync(f, "utf-8")); } catch {
+      ui.warn(`Skipping corrupted state file: ${f}`);
+      continue;
+    }
+    entries.push({ state, status: sandboxStatus(state) });
+  }
+  if (entries.length === 0) return;
+
+  entries.sort((a, b) => {
+    const ta = new Date(a.state.created || "").getTime() || 0;
+    const tb = new Date(b.state.created || "").getTime() || 0;
+    return tb - ta;
+  });
+
+  const sizeResults = await calculateSizes(
+    entries.map(e => ({
+      slug: e.state.slug,
+      branch: e.state.branch,
+      worktree: e.state.worktree,
+    })),
+  );
+  const sizeMap = new Map(sizeResults.map(r => [r.slug, r]));
+
+  const idWidth = Math.max(6, ...entries.map(e => e.state.slug.length)) + 2;
+  const sizeWidth = 10;
+  const header = [
+    "ID".padEnd(idWidth),
+    "SIZE".padEnd(sizeWidth),
+    "STATUS".padEnd(10),
+    "BRANCH",
+  ].join(" ");
+  const divider = [
+    "─".repeat(idWidth),
+    "─".repeat(sizeWidth),
+    "─".repeat(10),
+    "──────",
+  ].join(" ");
+
+  console.log(header);
+  console.log(divider);
+
+  for (const { state, status } of entries) {
+    const badge = ui.statusBadge(status);
+    const ansiOverhead = badge.length - status.length;
+    const sr = sizeMap.get(state.slug);
+    const sizeStr = sr?.sizeHuman ?? "--";
+    console.log([
+      state.slug.padEnd(idWidth),
+      sizeStr.padEnd(sizeWidth),
+      badge.padEnd(10 + ansiOverhead),
+      state.branch,
+    ].join(" "));
+  }
+
+  const totalKB = sizeResults.reduce((sum, r) => sum + (r.sizeKB ?? 0), 0);
+  console.log("");
+  console.log(`  Total: ${ui.bold(formatSizeKB(totalKB))}`);
+}
+
 // --- status ---
 
-function cmdStatus(args: string[]): void {
+async function cmdStatus(args: string[]): Promise<void> {
   let branch = "";
   let id = "";
   let i = 0;
@@ -195,7 +323,7 @@ function cmdStatus(args: string[]): void {
   }
 
   if (!branch) {
-    cmdList();
+    await cmdList();
     return;
   }
 
@@ -333,6 +461,7 @@ async function cmdCreate(args: string[]): Promise<CreateResult> {
       "add",
       "-b",
       branch,
+      "--no-track",
       worktreePath,
       `origin/${base}`,
       "--quiet",
@@ -351,10 +480,98 @@ async function cmdCreate(args: string[]): Promise<CreateResult> {
     const mainNodeModules = path.join(REPO_ROOT, "node_modules");
     const worktreeNodeModules = path.join(worktreePath, "node_modules");
     if (fs.existsSync(mainNodeModules) && !fs.existsSync(worktreeNodeModules)) {
-      console.log("Symlinking node_modules from main repo...");
-      fs.symlinkSync(mainNodeModules, worktreeNodeModules);
+      console.log("Linking node_modules packages from main repo...");
+      // Create a real node_modules directory and symlink each top-level entry
+      // inside it. A single directory symlink causes bundlers (webpack) to
+      // resolve the real path outside the worktree root, which breaks
+      // CSS-in-JS libraries like FluentUI/Griffel that rely on singleton
+      // style registries scoped to the project.
+      fs.mkdirSync(worktreeNodeModules);
+      for (const entry of fs.readdirSync(mainNodeModules)) {
+        fs.symlinkSync(
+          path.join(mainNodeModules, entry),
+          path.join(worktreeNodeModules, entry),
+        );
+      }
     }
   }
+
+  // Create bin/yarn shim to intercept `yarn add` and re-symlink after install
+  const binDir = path.join(worktreePath, "bin");
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(binDir, "yarn"),
+    `#!/bin/bash
+REAL_YARN="$(which -a yarn | grep -v "$0" | head -1)"
+SANDBOX_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+if [ "$1" = "add" ]; then
+  shift
+  REAL_YARN="$REAL_YARN" exec npx tsx "$SANDBOX_DIR/tools/sandbox-yarn-add.ts" "$@"
+else
+  exec "$REAL_YARN" "$@"
+fi
+`,
+  );
+  fs.chmodSync(path.join(binDir, "yarn"), 0o755);
+
+  // Create tools/sandbox-yarn-add.ts — runs real yarn add then re-symlinks
+  // packages that exist in the main repo's node_modules
+  const toolsDir = path.join(worktreePath, "tools");
+  fs.mkdirSync(toolsDir, { recursive: true });
+  const mainNodeModules = path.join(REPO_ROOT, "node_modules");
+  fs.writeFileSync(
+    path.join(toolsDir, "sandbox-yarn-add.ts"),
+    `import { execSync } from "node:child_process";
+import * as fs from "node:fs";
+import * as path from "node:path";
+
+const REAL_YARN = process.env.REAL_YARN;
+if (!REAL_YARN) {
+  console.error("REAL_YARN environment variable not set");
+  process.exit(1);
+}
+
+const MAIN_NODE_MODULES = ${JSON.stringify(mainNodeModules)};
+const SANDBOX_DIR = path.resolve(import.meta.dirname, "..");
+const SANDBOX_NODE_MODULES = path.join(SANDBOX_DIR, "node_modules");
+
+const packages = process.argv.slice(2);
+if (packages.length === 0) {
+  console.error("Usage: sandbox-yarn-add <package> [package...]");
+  process.exit(1);
+}
+
+// Run the real yarn add
+console.log(\`Running: \${REAL_YARN} add \${packages.join(" ")}\\n\`);
+execSync(\`"\${REAL_YARN}" add \${packages.join(" ")}\`, {
+  cwd: SANDBOX_DIR,
+  stdio: "inherit",
+});
+
+// Re-symlink: for every entry in sandbox node_modules, if the same entry
+// exists in the main repo's node_modules, replace with a symlink.
+// This keeps only sandbox-specific (newly added) packages as real directories.
+console.log("\\nRe-linking shared packages...");
+let relinked = 0;
+for (const entry of fs.readdirSync(SANDBOX_NODE_MODULES)) {
+  const sandboxEntry = path.join(SANDBOX_NODE_MODULES, entry);
+  const mainEntry = path.join(MAIN_NODE_MODULES, entry);
+
+  // Skip entries that are already symlinks
+  try {
+    if (fs.lstatSync(sandboxEntry).isSymbolicLink()) continue;
+  } catch { continue; }
+
+  // If the package exists in main node_modules, replace with symlink
+  if (fs.existsSync(mainEntry)) {
+    fs.rmSync(sandboxEntry, { recursive: true, force: true });
+    fs.symlinkSync(mainEntry, sandboxEntry);
+    relinked++;
+  }
+}
+console.log(\`Re-linked \${relinked} package(s). Sandbox-only packages preserved.\\n\`);
+`,
+  );
 
   // Copy all role prompts into the sandbox
   const promptFiles = getPromptFiles();
@@ -396,6 +613,8 @@ async function cmdCreate(args: string[]): Promise<CreateResult> {
   const sandboxIgnores = [
     "sandbox.code-workspace",
     "prompts/",
+    "bin/",
+    "tools/",
     "ralph-*.log",
     "ralph-log.md",
     "ignored-comments.txt",
@@ -1034,7 +1253,11 @@ Write ONLY the system prompt content, no preamble or explanation. The prompt sho
       : `You are starting a new session. Your task: ${idea}. Begin working on this immediately. Create small, committed increments of progress.`;
 
     const logFd = fs.openSync(logFile, "w");
-    const env: Record<string, string | undefined> = { ...process.env, SANDBOX_DIR: worktreePath };
+    const env: Record<string, string | undefined> = {
+      ...process.env,
+      SANDBOX_DIR: worktreePath,
+      PATH: `${path.join(worktreePath, "bin")}:${process.env.PATH}`,
+    };
     delete env.CLAUDECODE;
 
     const child = spawn(
@@ -1121,7 +1344,11 @@ Write ONLY the system prompt content, no preamble or explanation. The prompt sho
       path.join(worktreePath, startPrompt),
       "utf-8",
     );
-    const env: Record<string, string | undefined> = { ...process.env, SANDBOX_DIR: worktreePath };
+    const env: Record<string, string | undefined> = {
+      ...process.env,
+      SANDBOX_DIR: worktreePath,
+      PATH: `${path.join(worktreePath, "bin")}:${process.env.PATH}`,
+    };
     delete env.CLAUDECODE;
 
     spawnSync(
@@ -1603,6 +1830,7 @@ async function main(): Promise<void> {
     start <opts>       Create sandbox & launch Claude session
     ralph <opts>       Automated dev/review loop in sandbox
     list               Show all sandboxes
+    size [<target>]    Show disk usage of sandbox worktrees
     status <target>    Show detailed status of a sandbox
     clean <target>     Remove sandbox (worktree, branch, state)
     roles              List available prompt roles
@@ -1637,6 +1865,11 @@ async function main(): Promise<void> {
     --headless           Run without interactive terminal
     --review             Start with review step instead of dev
     --no-agents          Disable agent teams (fully automated, -p mode)
+
+  Size options:
+    <short-id>           Size of a specific sandbox
+    --branch <name>      Size by branch name
+    (no args)            Show sizes for all sandboxes
 
   Status options:
     <short-id>           Lookup by short ID
@@ -1690,14 +1923,17 @@ async function main(): Promise<void> {
       await cmdDistill(rest);
       break;
     case "status":
-      cmdStatus(rest);
+      await cmdStatus(rest);
+      break;
+    case "size":
+      await cmdSize(rest);
       break;
     case "clean":
     case "cleanup":
       await cmdClean(rest);
       break;
     case "list":
-      cmdList();
+      await cmdList();
       break;
     case "roles":
       cmdRoles();
@@ -1705,7 +1941,7 @@ async function main(): Promise<void> {
     default:
       die(
         `Unknown command: '${command}'.`, [
-          "Available: start, list, status, clean, ralph, create, distill, roles",
+          "Available: start, list, size, status, clean, ralph, create, distill, roles",
           "Run 'sandbox --help' for usage.",
         ],
       );

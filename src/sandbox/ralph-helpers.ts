@@ -236,7 +236,11 @@ export async function runAgentWithTimer(
   worktree: string,
   logFile: string,
 ): Promise<{ result: "done" | "stopped"; sessionId: string }> {
-  const env: Record<string, string | undefined> = { ...process.env, SANDBOX_DIR: worktree };
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    SANDBOX_DIR: worktree,
+    PATH: `${path.join(worktree, "bin")}:${process.env.PATH}`,
+  };
   delete env.CLAUDECODE;
 
   const sessionId = crypto.randomUUID();
@@ -348,7 +352,11 @@ export async function runInteractiveAgentWithLog(
   worktree: string,
   logFile: string,
 ): Promise<{ result: "done" | "stopped"; sessionId: string }> {
-  const env: Record<string, string | undefined> = { ...process.env, SANDBOX_DIR: worktree };
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    SANDBOX_DIR: worktree,
+    PATH: `${path.join(worktree, "bin")}:${process.env.PATH}`,
+  };
   delete env.CLAUDECODE;
 
   // Generate a session ID so we can find the transcript after exit
