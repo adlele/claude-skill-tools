@@ -3,6 +3,80 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
+import { getAllPromptFiles } from "../shared/paths.js";
+
+/**
+ * Extract section headings (## / ###) and top-level bullets (- ) from prompt markdown.
+ * Returns lines prefixed with a `## filename` header. ## headings are promoted to ###
+ * so they nest under the filename header. Returns an empty array if nothing was extracted.
+ */
+export function extractPromptDigest(basename: string, content: string): string[] {
+  const lines = content.split("\n");
+  const extracted: string[] = [`## ${basename}`];
+
+  for (const line of lines) {
+    if (/^#{2,3}\s/.test(line)) {
+      extracted.push(line.startsWith("## ") ? `###${line.slice(2)}` : line);
+    } else if (/^- /.test(line)) {
+      extracted.push(line);
+    }
+  }
+
+  // Only return if we found headings or bullets beyond the filename header
+  return extracted.length > 1 ? extracted : [];
+}
+
+/**
+ * Extract a compact digest from role prompt files: section headings + top-level bullets.
+ * Skips files prefixed with "old_". Returns empty string if no prompts are found.
+ */
+export function buildRoleDigest(): string {
+  let files: string[];
+  try {
+    files = getAllPromptFiles();
+  } catch {
+    return "";
+  }
+  if (files.length === 0) return "";
+
+  const sections: string[] = [];
+
+  for (const filePath of files) {
+    const basename = path.basename(filePath);
+    if (basename.startsWith("old_")) continue;
+
+    let content: string;
+    try {
+      content = fs.readFileSync(filePath, "utf-8");
+    } catch {
+      continue;
+    }
+
+    const lines = extractPromptDigest(basename, content);
+    if (lines.length > 0) {
+      sections.push(lines.join("\n"));
+    }
+  }
+
+  return sections.join("\n\n");
+}
+
+/**
+ * Build the exclusion block that tells the distill model what NOT to repeat.
+ * Returns empty string if no role prompts are found (graceful degradation).
+ */
+function buildExclusionBlock(): string {
+  const digest = buildRoleDigest();
+  if (!digest) return "";
+
+  return `
+
+IMPORTANT — The topics below are ALREADY enforced by the downstream agent system prompts (analyst, architect, developer, reviewer, tester). Do NOT include any of this generic guidance in your output. Only include decisions, constraints, and specifications SPECIFIC to this particular feature. If a guideline would apply equally to any feature in this codebase, omit it.
+
+--- Topics already covered by role prompts (DO NOT REPEAT) ---
+${digest}
+--- End ---`;
+}
 
 const DISTILL_PROMPT = `You are a prompt engineer. Read these three documents from a software feature development workflow:
 
@@ -21,6 +95,7 @@ Rules:
 - Include scope boundaries (what's in, what's out)
 - Include non-functional requirements (performance, security, etc.)
 - Do NOT include implementation details like file paths or function names
+- Do NOT include generic coding standards, testing conventions, naming patterns, error handling strategies, or workflow rules — these are enforced separately by the development agent prompts. Only include guidance SPECIFIC to this feature.
 - Keep it as a single markdown document, ~2-4x the length of the original feature request
 - Start with a # heading
 
@@ -53,7 +128,8 @@ export async function generateImprovedFeatureRequest(
   const requirements = fs.readFileSync(requirementsPath, "utf-8");
   const spec = fs.readFileSync(specPath, "utf-8");
 
-  const fullPrompt = `${DISTILL_PROMPT}
+  const exclusion = buildExclusionBlock();
+  const fullPrompt = `${DISTILL_PROMPT}${exclusion}
 
 --- feature-request.md ---
 ${featureRequest}
@@ -259,6 +335,7 @@ Rules:
 - Include integration points and constraints that a developer would need to know
 - Write in the same voice/style as the original feature-request.md
 - Do NOT include raw file paths or function names — describe behavior and capabilities
+- Do NOT include generic coding standards, testing conventions, naming patterns, error handling strategies, or workflow rules — these are enforced separately by the development agent prompts. Only include constraints and technical choices SPECIFIC to this feature's implementation.
 - Keep it as a single markdown document, ~2-4x the length of the original feature request
 - Start with a # heading
 
@@ -316,7 +393,8 @@ export async function generateImplementationFeatureRequest(
     codeDiff = codeDiff.slice(0, MAX_DIFF_CHARS) + "\n\n[... diff truncated ...]";
   }
 
-  const fullPrompt = `${IMPL_DISTILL_PROMPT}
+  const exclusion = buildExclusionBlock();
+  const fullPrompt = `${IMPL_DISTILL_PROMPT}${exclusion}
 
 --- feature-request.md ---
 ${featureRequest}

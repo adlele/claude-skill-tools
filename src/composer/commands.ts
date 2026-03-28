@@ -548,6 +548,54 @@ export async function cmdClean(args: string[]): Promise<void> {
   console.log(`\nCleaned ${toRemove.length} session(s).`);
 }
 
+export function cmdRetro(args: string[]): void {
+  let sessionId = "";
+  let model = "sonnet";
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--model") {
+      model = args[++i] ?? "sonnet";
+    } else if (!args[i].startsWith("--")) {
+      sessionId = args[i];
+    } else {
+      die(`Unknown option for retro: ${args[i]}`, ["Run 'composer --help' for usage."]);
+    }
+  }
+
+  let session: SessionState;
+  if (sessionId) {
+    session = readState(resolveSessionId(sessionId));
+  } else {
+    const sessions = listStateSessions()
+      .filter(s => s.status === "in_progress" || s.status === "completed")
+      .sort((a, b) => {
+        const ta = new Date(a.updated || a.started || "").getTime() || 0;
+        const tb = new Date(b.updated || b.started || "").getTime() || 0;
+        return tb - ta;
+      });
+    if (sessions.length === 0) {
+      die("No sessions found.", [
+        "Provide a session ID: composer retro <session-id>",
+        "Run 'composer sessions' to see all sessions.",
+      ]);
+    }
+    session = sessions[0];
+  }
+
+  if (!session.branch) {
+    die(`Session '${session.sessionId}' has no associated sandbox.`, [
+      "The sandbox may not have been created yet.",
+    ]);
+  }
+
+  const repoRoot = getRepoRoot();
+  const sandboxBin = path.join(PACKAGE_ROOT, "dist", "bin", "sandbox.js");
+  spawnSync(
+    "node",
+    [sandboxBin, "retro", "--branch", session.branch, "--model", model],
+    { cwd: repoRoot, stdio: "inherit" },
+  );
+}
+
 export function cmdSize(args: string[]): void {
   let sessionId = "";
   for (const a of args) {

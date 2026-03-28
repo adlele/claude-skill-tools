@@ -10,6 +10,7 @@ import {
   cmdReport,
   cmdDistill,
   cmdSize,
+  cmdRetro,
 } from "./commands.js";
 import { currentSession, writeState, listStateSessions } from "./state.js";
 import { cleanupAllTempFiles } from "./execution.js";
@@ -99,6 +100,7 @@ function printWelcome(): void {
     `    ${ui.cyan("report")} [session-id]    Generate metrics report for a session`,
     `    ${ui.cyan("distill")} [session-id]   Distill feature request from session artifacts`,
     `    ${ui.cyan("size")} [session-id]      Show sandbox disk usage`,
+    `    ${ui.cyan("retro")} [session-id]     Extract learnings from review comments`,
     `    ${ui.cyan("--help")}                  Full usage details`,
     "",
   ].join("\n"));
@@ -121,6 +123,7 @@ function printHelp(): void {
     `  report [session-id] [--json|--text]   Generate metrics report`,
     `  distill [session-id] [options]        Distill feature request from artifacts`,
     `  size [session-id]                      Show sandbox disk usage`,
+    `  retro [session-id] [--model <model>]   Extract learnings from review comments`,
     "",
     ui.bold("Compose options:"),
     `  --context "..."                       Inline context string`,
@@ -216,13 +219,16 @@ async function main(): Promise<void> {
     case "size":
       cmdSize(rest);
       break;
+    case "retro":
+      cmdRetro(rest);
+      break;
     default:
       console.error([
         "",
         `  ${ui.red(ui.bold("ERROR:"))} Unknown command '${command}'.`,
         "",
         `  ${ui.yellow("Suggestions:")}`,
-        `    ${ui.yellow("1.")} Available commands: list, compose, resume, sessions, clean, report, distill, size`,
+        `    ${ui.yellow("1.")} Available commands: list, compose, resume, sessions, clean, report, distill, size, retro`,
         `    ${ui.yellow("2.")} Run 'composer --help' for full usage.`,
         "",
       ].join("\n"));

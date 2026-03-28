@@ -43,6 +43,7 @@ import {
   printDistillBanner,
 } from "./distill.js";
 import { calculateSizes, formatSizeKB } from "./size.js";
+import { extractAllComments, synthesizeLearnings } from "./retro.js";
 
 // ============================================================
 // COMMANDS
@@ -217,7 +218,11 @@ async function cmdSize(args: string[]): Promise<void> {
       false,
     );
     const r = results[0];
-    console.log(`${ui.bold(state.branch)}: ${r.sizeHuman}`);
+    if (r.sizeKB == null) {
+      console.log(`${ui.bold(state.branch)}: ${ui.dim("-- (worktree missing)")} ${ui.dim(state.worktree)}`);
+    } else {
+      console.log(`${ui.bold(state.branch)}: ${r.sizeHuman}`);
+    }
     return;
   }
 
@@ -1815,6 +1820,87 @@ async function cmdDistill(args: string[]): Promise<void> {
   printDistillBanner(content, worktree, changesSummary);
 }
 
+// --- retro ---
+
+async function cmdRetro(args: string[]): Promise<void> {
+  let branch = "";
+  let model = "sonnet";
+
+  let i = 0;
+  while (i < args.length) {
+    switch (args[i]) {
+      case "--branch":
+        branch = args[++i] ?? "";
+        i++;
+        break;
+      case "--model":
+        model = args[++i] ?? "";
+        i++;
+        break;
+      default:
+        die(`Unknown option for retro: ${args[i]}`, ["Run 'sandbox --help' for usage."]);
+    }
+  }
+
+  if (!branch) die("Must provide --branch");
+
+  const state = readState(branch);
+  const worktree = state.worktree;
+
+  if (!fs.existsSync(worktree)) die(`Worktree not found: ${worktree}`);
+
+  // Extract comments from all review iterations
+  console.log(`Extracting review comments from ${worktree}...`);
+  const allComments = extractAllComments(worktree);
+
+  if (allComments.length === 0) {
+    die("No review comments found.", [
+      "This sandbox may not have run any ralph iterations yet.",
+      "Comments are extracted from ralph-rev-N.log files.",
+    ]);
+  }
+
+  console.log(`Found comments from ${allComments.length} iteration(s).`);
+  console.log("");
+
+  // Synthesize learnings
+  console.log("Synthesizing learnings...");
+  const content = await synthesizeLearnings(worktree, allComments, model);
+
+  if (!content) {
+    console.log("Failed to synthesize learnings.");
+    return;
+  }
+
+  // Display
+  console.log("");
+  console.log("=== Retro Learnings ===");
+  console.log(`Saved to: ${path.join(worktree, "retro-learnings.md")}`);
+  console.log("");
+  console.log(content);
+  console.log("");
+
+  // Prompt for action
+  const repoRoot = getRepoRoot();
+  const claudeMdPath = path.join(repoRoot, "CLAUDE.md");
+
+  const answer = await promptUser(
+    "  Action: (c)laude.md  (q)uit  > ",
+  );
+  const choice = answer.trim().toLowerCase();
+
+  if (choice === "c") {
+    const existing = fs.existsSync(claudeMdPath)
+      ? fs.readFileSync(claudeMdPath, "utf-8")
+      : "";
+    fs.writeFileSync(
+      claudeMdPath,
+      existing + "\n\n" + content + "\n",
+    );
+    console.log(`  ✓ Appended to ${claudeMdPath}`);
+  }
+}
+
 // ============================================================
 // MAIN
 // ============================================================
@@ -1836,6 +1922,7 @@ async function main(): Promise<void> {
     roles              List available prompt roles
     create <opts>      Create a sandbox without launching Claude
     distill <opts>     Distill feature request from sandbox
+    retro <opts>       Extract learnings from review iterations
 
   Start options:
     --role <name>        Role to run (e.g. analyst, architect, developer)
@@ -1892,6 +1979,10 @@ async function main(): Promise<void> {
     --branch <name>      Branch to distill from (required)
     --model <model>      Model to use (default: sonnet)
 
+  Retro options:
+    --branch <name>      Branch to extract learnings from (required)
+    --model <model>      Model to use (default: sonnet)
+
   Examples:
     sandbox start --role architect --context "Add caching"
     sandbox start --ralph --context "Fix login bug" --max-iterations 5
@@ -1922,6 +2013,9 @@ async function main(): Promise<void> {
     case "distill":
       await cmdDistill(rest);
       break;
+    case "retro":
+      await cmdRetro(rest);
+      break;
     case "status":
       await cmdStatus(rest);
       break;
@@ -1941,7 +2035,7 @@ async function main(): Promise<void> {
     default:
       die(
         `Unknown command: '${command}'.`, [
-          "Available: start, list, size, status, clean, ralph, create, distill, roles",
+          "Available: start, list, size, status, clean, ralph, create, distill, retro, roles",
           "Run 'sandbox --help' for usage.",
         ],
       );
