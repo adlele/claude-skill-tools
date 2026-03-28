@@ -9,7 +9,8 @@
   "bin": {
     "composer": "./dist/bin/composer.js",
     "sandbox": "./dist/bin/sandbox.js",
-    "session-explorer": "./dist/bin/session-explorer.js"
+    "session-explorer": "./dist/bin/session-explorer.js",
+    "session-analyzer": "./dist/bin/session-analyzer.js"
   },
   "files": [
     "dist/",

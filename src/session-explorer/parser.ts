@@ -189,6 +189,78 @@ function readJsonl(filePath: string): RawLogEntry[] {
 
 // ─── Session file discovery ─────────────────────────────────────────────────
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * Pick the "main" conversation file from a session's subagents directory.
+ * Heuristic: largest non-prompt-suggestion .jsonl file (most conversation data).
+ */
+function pickMainSubagentFile(sessionDir: string): string | null {
+  const subDir = path.join(sessionDir, "subagents");
+  if (!fs.existsSync(subDir)) return null;
+
+  let bestFile: string | null = null;
+  let bestSize = -1;
+
+  try {
+    for (const f of fs.readdirSync(subDir)) {
+      if (!f.endsWith(".jsonl")) continue;
+      // Skip prompt suggestions — they're lightweight background agents
+      if (f.includes("prompt_suggestion")) continue;
+      const full = path.join(subDir, f);
+      try {
+        const size = fs.statSync(full).size;
+        if (size > bestSize) {
+          bestSize = size;
+          bestFile = full;
+        }
+      } catch { /* skip */ }
+    }
+  } catch { /* skip */ }
+
+  // Fall back to any .jsonl if all are prompt suggestions
+  if (!bestFile) {
+    try {
+      for (const f of fs.readdirSync(subDir)) {
+        if (!f.endsWith(".jsonl")) continue;
+        const full = path.join(subDir, f);
+        try {
+          const size = fs.statSync(full).size;
+          if (size > bestSize) {
+            bestSize = size;
+            bestFile = full;
+          }
+        } catch { /* skip */ }
+      }
+    } catch { /* skip */ }
+  }
+
+  return bestFile;
+}
+
+/**
+ * Extract project path from a JSONL file's entries, falling back to decoding
+ * from the project directory name.
+ */
+function extractProjectPath(filePath: string, projectDir: string): string {
+  try {
+    const raw = fs.readFileSync(filePath, "utf-8");
+    const lines = raw.split("\n").filter((l) => l.trim());
+    for (let i = 0; i < Math.min(lines.length, 50); i++) {
+      try {
+        const entry = JSON.parse(lines[i]);
+        if (entry.cwd) return entry.cwd;
+      } catch { /* skip */ }
+    }
+  } catch { /* ignore */ }
+
+  // Fallback: decode from directory name
+  const dirName = path.basename(projectDir);
+  return dirName.startsWith("-")
+    ? dirName.slice(1).replace(/-/g, "/")
+    : dirName;
+}
+
 export interface SessionFileInfo {
   mainFile: string;
   sessionDir: string;
@@ -222,26 +294,52 @@ export function findSessionFile(sessionIdPrefix: string): SessionFileInfo {
   const matches: Match[] = [];
 
   for (const projectDir of projectDirs) {
-    // Check for JSONL files directly in the project dir
-    let files: string[];
+    let entries: string[];
     try {
-      files = fs.readdirSync(projectDir).filter((f) => f.endsWith(".jsonl"));
+      entries = fs.readdirSync(projectDir);
     } catch {
       continue;
     }
 
-    for (const f of files) {
+    // Legacy format: <sessionId>.jsonl directly in project dir
+    for (const f of entries) {
+      if (!f.endsWith(".jsonl")) continue;
       const sid = path.basename(f, ".jsonl");
       if (sid.startsWith(sessionIdPrefix)) {
         const full = path.join(projectDir, f);
-        const stat = fs.statSync(full);
+        try {
+          const stat = fs.statSync(full);
+          matches.push({
+            mainFile: full,
+            sessionId: sid,
+            projectDir,
+            mtime: stat.mtimeMs,
+          });
+        } catch { /* skip */ }
+      }
+    }
+
+    // New format: UUID-named session directories with subagents/
+    for (const d of entries) {
+      if (!UUID_RE.test(d)) continue;
+      if (!d.startsWith(sessionIdPrefix)) continue;
+      const sessionDir = path.join(projectDir, d);
+      try {
+        if (!fs.statSync(sessionDir).isDirectory()) continue;
+      } catch { continue; }
+
+      const mainFile = pickMainSubagentFile(sessionDir);
+      if (!mainFile) continue;
+
+      try {
+        const stat = fs.statSync(mainFile);
         matches.push({
-          mainFile: full,
-          sessionId: sid,
+          mainFile,
+          sessionId: d,
           projectDir,
           mtime: stat.mtimeMs,
         });
-      }
+      } catch { /* skip */ }
     }
   }
 
@@ -254,35 +352,11 @@ export function findSessionFile(sessionIdPrefix: string): SessionFileInfo {
   const best = matches[0];
 
   // Determine the session subdir (for subagents)
-  const sessionDir = path.join(best.projectDir, best.sessionId);
+  const sessionDir = UUID_RE.test(path.basename(path.dirname(path.dirname(best.mainFile))))
+    ? path.join(best.projectDir, best.sessionId) // new format: sessionDir is the UUID dir
+    : path.join(best.projectDir, best.sessionId); // legacy: sessionDir may or may not exist
 
-  // Determine project path from the JSONL entries' cwd field
-  let projectPath = "";
-  try {
-    const raw = fs.readFileSync(best.mainFile, "utf-8");
-    const lines = raw.split("\n").filter((l) => l.trim());
-    // Scan first 50 lines for a cwd field
-    for (let i = 0; i < Math.min(lines.length, 50); i++) {
-      try {
-        const entry = JSON.parse(lines[i]);
-        if (entry.cwd) {
-          projectPath = entry.cwd;
-          break;
-        }
-      } catch {
-        /* skip */
-      }
-    }
-  } catch {
-    /* ignore read errors */
-  }
-  // Fallback: decode from directory name
-  if (!projectPath) {
-    const dirName = path.basename(best.projectDir);
-    projectPath = dirName.startsWith("-")
-      ? dirName.slice(1).replace(/-/g, "/")
-      : dirName;
-  }
+  const projectPath = extractProjectPath(best.mainFile, best.projectDir);
 
   return {
     mainFile: best.mainFile,
@@ -395,14 +469,16 @@ export function listAllSessions(): SessionListEntry[] {
   const sessions: SessionListEntry[] = [];
 
   for (const projectDir of projectDirs) {
-    let files: string[];
+    let entries: string[];
     try {
-      files = fs.readdirSync(projectDir).filter((f) => f.endsWith(".jsonl"));
+      entries = fs.readdirSync(projectDir);
     } catch {
       continue;
     }
 
-    for (const f of files) {
+    // Legacy format: <sessionId>.jsonl directly in project dir
+    for (const f of entries) {
+      if (!f.endsWith(".jsonl")) continue;
       const sessionId = path.basename(f, ".jsonl");
       const fullPath = path.join(projectDir, f);
       let stat: fs.Stats;
@@ -414,7 +490,6 @@ export function listAllSessions(): SessionListEntry[] {
 
       const peek = peekSession(fullPath);
 
-      // Derive project path
       let projectPath = peek.cwd;
       if (!projectPath) {
         const dirName = path.basename(projectDir);
@@ -425,6 +500,47 @@ export function listAllSessions(): SessionListEntry[] {
 
       sessions.push({
         sessionId,
+        projectPath,
+        gitBranch: peek.gitBranch,
+        slug: peek.slug,
+        customTitle: peek.customTitle,
+        created: peek.created || stat.birthtime.toISOString(),
+        modified: stat.mtime.toISOString(),
+        firstPrompt: peek.firstPrompt,
+        messageCount: peek.messageCount,
+      });
+    }
+
+    // New format: UUID-named session directories with subagents/
+    for (const d of entries) {
+      if (!UUID_RE.test(d)) continue;
+      const sessionDir = path.join(projectDir, d);
+      try {
+        if (!fs.statSync(sessionDir).isDirectory()) continue;
+      } catch { continue; }
+
+      const mainFile = pickMainSubagentFile(sessionDir);
+      if (!mainFile) continue;
+
+      let stat: fs.Stats;
+      try {
+        stat = fs.statSync(mainFile);
+      } catch {
+        continue;
+      }
+
+      const peek = peekSession(mainFile);
+
+      let projectPath = peek.cwd;
+      if (!projectPath) {
+        const dirName = path.basename(projectDir);
+        projectPath = dirName.startsWith("-")
+          ? dirName.slice(1).replace(/-/g, "/")
+          : dirName;
+      }
+
+      sessions.push({
+        sessionId: d,
         projectPath,
         gitBranch: peek.gitBranch,
         slug: peek.slug,
@@ -733,10 +849,11 @@ interface SubagentData {
   entries: RawLogEntry[];
 }
 
-function loadSubagents(sessionDir: string): SubagentData[] {
+function loadSubagents(sessionDir: string, excludeFile?: string): SubagentData[] {
   const subDir = path.join(sessionDir, "subagents");
   if (!fs.existsSync(subDir)) return [];
 
+  const excludeBase = excludeFile ? path.basename(excludeFile) : "";
   const files = fs.readdirSync(subDir);
   const agentMap = new Map<string, SubagentData>();
 
@@ -756,9 +873,10 @@ function loadSubagents(sessionDir: string): SubagentData[] {
     }
   }
 
-  // Load JSONL files
+  // Load JSONL files (skip the file used as mainFile to avoid double-processing)
   for (const f of files) {
     if (!f.endsWith(".jsonl")) continue;
+    if (f === excludeBase) continue;
     const agentId = f.replace(/^agent-/, "").replace(/\.jsonl$/, "");
     if (!agentMap.has(agentId)) {
       agentMap.set(agentId, { agentId, agentType: "unknown", entries: [] });
@@ -810,8 +928,8 @@ export function parseSessionDeep(
   };
   processEntriesToTimeline(entries, ctx);
 
-  // Step 5: Load and process subagents
-  const subagentDataList = loadSubagents(sessionDir);
+  // Step 5: Load and process subagents (exclude mainFile to avoid double-counting)
+  const subagentDataList = loadSubagents(sessionDir, mainFile);
   const subagentInfos: SubagentInfo[] = [];
 
   for (const sub of subagentDataList) {

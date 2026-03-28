@@ -294,6 +294,8 @@ function parseArgs(argv: string[]): CliArgs {
 
 // ─── Project Discovery ───────────────────────────────────────────────────────
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
 export function getProjectDir(cwd?: string): string {
   const dir = cwd ?? process.cwd();
   const encoded = dir.replace(/\//g, "-");
@@ -303,6 +305,68 @@ export function getProjectDir(cwd?: string): string {
     process.exit(1);
   }
   return claudeDir;
+}
+
+/**
+ * Pick the "main" conversation file from a session's subagents directory.
+ * Heuristic: largest non-prompt-suggestion .jsonl file.
+ */
+function pickMainSubagentFile(sessionDir: string): string | null {
+  const subDir = path.join(sessionDir, "subagents");
+  if (!fs.existsSync(subDir)) return null;
+
+  let bestFile: string | null = null;
+  let bestSize = -1;
+
+  try {
+    for (const f of fs.readdirSync(subDir)) {
+      if (!f.endsWith(".jsonl")) continue;
+      if (f.includes("prompt_suggestion")) continue;
+      const full = path.join(subDir, f);
+      try {
+        const size = fs.statSync(full).size;
+        if (size > bestSize) { bestSize = size; bestFile = full; }
+      } catch { /* skip */ }
+    }
+  } catch { /* skip */ }
+
+  // Fall back to any .jsonl if all are prompt suggestions
+  if (!bestFile) {
+    try {
+      for (const f of fs.readdirSync(subDir)) {
+        if (!f.endsWith(".jsonl")) continue;
+        const full = path.join(subDir, f);
+        try {
+          const size = fs.statSync(full).size;
+          if (size > bestSize) { bestSize = size; bestFile = full; }
+        } catch { /* skip */ }
+      }
+    } catch { /* skip */ }
+  }
+
+  return bestFile;
+}
+
+/**
+ * Read and concatenate all .jsonl lines from a session directory's subagents/.
+ */
+function readSessionDirLines(sessionDir: string): string[] {
+  const subDir = path.join(sessionDir, "subagents");
+  if (!fs.existsSync(subDir)) return [];
+
+  const allLines: string[] = [];
+  try {
+    for (const f of fs.readdirSync(subDir)) {
+      if (!f.endsWith(".jsonl")) continue;
+      try {
+        const raw = fs.readFileSync(path.join(subDir, f), "utf-8");
+        for (const line of raw.split("\n")) {
+          if (line.trim()) allLines.push(line);
+        }
+      } catch { /* skip */ }
+    }
+  } catch { /* skip */ }
+  return allLines;
 }
 
 // ─── Session Index ───────────────────────────────────────────────────────────
@@ -358,12 +422,18 @@ export function loadSessionIndex(projectDir: string): IndexEntry[] {
     }
   }
 
-  // Scan all JSONL files and merge any missing from the index
-  const files = fs.readdirSync(projectDir).filter((f) => f.endsWith(".jsonl"));
-  for (const f of files) {
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(projectDir);
+  } catch {
+    return Array.from(indexed.values());
+  }
+
+  // Legacy format: scan all JSONL files directly in project dir
+  for (const f of entries) {
+    if (!f.endsWith(".jsonl")) continue;
     const sessionId = path.basename(f, ".jsonl");
     if (indexed.has(sessionId)) {
-      // Update mtime from disk in case index is stale
       const stat = fs.statSync(path.join(projectDir, f));
       const existing = indexed.get(sessionId)!;
       existing.fileMtime = stat.mtimeMs;
@@ -375,6 +445,39 @@ export function loadSessionIndex(projectDir: string): IndexEntry[] {
     indexed.set(sessionId, {
       sessionId,
       fullPath,
+      fileMtime: stat.mtimeMs,
+      firstPrompt: peek.firstPrompt,
+      summary: "",
+      messageCount: peek.messageCount,
+      created: peek.created || stat.birthtime.toISOString(),
+      modified: stat.mtime.toISOString(),
+      gitBranch: peek.gitBranch,
+      projectPath: "",
+      isSidechain: false,
+    });
+  }
+
+  // New format: UUID-named session directories with subagents/
+  for (const d of entries) {
+    if (!UUID_RE.test(d)) continue;
+    if (indexed.has(d)) continue;
+    const sessionDir = path.join(projectDir, d);
+    try {
+      if (!fs.statSync(sessionDir).isDirectory()) continue;
+    } catch { continue; }
+
+    const mainFile = pickMainSubagentFile(sessionDir);
+    if (!mainFile) continue;
+
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(mainFile);
+    } catch { continue; }
+
+    const peek = peekSessionJsonl(mainFile);
+    indexed.set(d, {
+      sessionId: d,
+      fullPath: mainFile,
       fileMtime: stat.mtimeMs,
       firstPrompt: peek.firstPrompt,
       summary: "",
@@ -545,8 +648,12 @@ interface TaskAccumulator {
 }
 
 export function parseSession(filePath: string): SessionMetrics {
-  const raw = fs.readFileSync(filePath, "utf-8");
-  const lines = raw.split("\n").filter((l) => l.trim().length > 0);
+  // New format: if filePath is inside a subagents/ dir, read all files in the session
+  const parentDir = path.dirname(filePath);
+  const isNewFormat = path.basename(parentDir) === "subagents";
+  const lines = isNewFormat
+    ? readSessionDirLines(path.dirname(parentDir))
+    : fs.readFileSync(filePath, "utf-8").split("\n").filter((l) => l.trim().length > 0);
 
   const entries: LogEntry[] = [];
   for (const line of lines) {
@@ -1909,10 +2016,12 @@ function main(): void {
   }
 }
 
-// CLI entry point — only runs when invoked directly
+// CLI entry point — only runs when invoked directly or via bin shim
 if (
   import.meta.url === `file://${process.argv[1]}` ||
-  process.argv[1]?.endsWith("session-metrics.ts")
+  process.argv[1]?.endsWith("session-metrics.ts") ||
+  process.argv[1]?.endsWith("session-analyzer.ts") ||
+  process.argv[1]?.endsWith("session-analyzer.js")
 ) {
   main();
 }
