@@ -1,7 +1,7 @@
 {
-  "name": "claude-skill-tools",
+  "name": "@adlele/claude-skill-tools",
   "version": "0.1.0",
-  "description": "Composer and sandbox developer tools for Claude Code workflows",
+  "description": "A collection of AI development tools, primarily built with Claude Code CLI in mind",
   "type": "module",
   "engines": {
     "node": ">=18"

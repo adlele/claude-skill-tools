@@ -12,8 +12,8 @@ claude-skill-tools currently includes three CLI tools. Each serves a distinct pu
 
 | Tool | Purpose | Key command |
 |:-----|:--------|:------------|
-| [Composer](composer) | Orchestrate end-to-end workflows | `composer compose full --ado 12345` |
-| [Sandbox](sandbox) | Manage worktree sandboxes and run ralph loops | `sandbox start --role architect --context "..."` |
-| [Session Explorer](session-explorer) | Analyze Claude session logs | `session-explorer <sessionId>` |
+| [Composer](/guide/composer) | Orchestrate end-to-end workflows | `composer compose full --ado 12345` |
+| [Sandbox](/guide/sandbox) | Manage worktree sandboxes and run ralph loops | `sandbox start --role architect --context "..."` |
+| [Session Explorer](/guide/session-explorer) | Analyze Claude session logs | `session-explorer <sessionId>` |
 
 All three tools share a common state layer on disk. Composer state lives in `<repo>/.claude/.skill-state/composer/`, sandbox state lives in `<repo>/.claude/.skill-state/sandbox/`, and user-level durable data (session maps, config) lives in `~/claude-skill-tools/`.
